@@ -1,0 +1,36 @@
+[Unit]
+Description=Native Rust photo frame for the 2F office display
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=@USER@
+Group=@USER@
+SupplementaryGroups=render video
+RuntimeDirectory=photo-frame-rs
+RuntimeDirectoryMode=0700
+WorkingDirectory=/run/photo-frame-rs
+Environment=DISPLAY=:1
+Environment=XAUTHORITY=@HOME@/.Xauthority
+Environment=HOME=/run/photo-frame-rs
+Environment=XDG_CONFIG_HOME=/run/photo-frame-rs/config
+Environment=XDG_CACHE_HOME=/run/photo-frame-rs/cache
+Environment=TMPDIR=/run/photo-frame-rs/tmp
+Environment=MESA_SHADER_CACHE_DISABLE=true
+ExecStartPre=/usr/bin/install -d -m 0700 /run/photo-frame-rs/tmp /run/photo-frame-rs/cache /run/photo-frame-rs/config
+# X is started by the tty1 autologin session, outside systemd target ordering.
+ExecStartPre=/usr/bin/timeout 120 /bin/sh -c "until [ -S /tmp/.X11-unix/X1 ]; do sleep 0.5; done"
+ExecStart=@APP_ROOT@/current/bin/photo-frame-rs --fullscreen --scale 2 --live-tile --status-port 8096
+Restart=always
+RestartSec=3
+CPUQuota=120%
+TimeoutStopSec=10
+KillMode=control-group
+StandardOutput=null
+StandardError=journal
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=graphical.target

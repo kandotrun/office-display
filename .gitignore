@@ -1,0 +1,29 @@
+# Rust build output
+photo-frame-rs/target/
+photo-frame-rs/bin/
+releases/
+
+# Deployed artifacts / archives
+*.tar.gz
+*.zip
+
+# Photos and captures must never be committed
+photos/
+*.jpg
+*.jpeg
+*.png
+*.heic
+*.HEIC
+!docs/**/*.png
+
+# Secrets and machine-local state
+.env
+*.key
+*.pem
+id_*
+known_hosts
+.ssh/
+
+# OS noise
+.DS_Store
+*.log

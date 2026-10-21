@@ -1,0 +1,5 @@
+# Auto-start X on tty1 for the display account.
+# The display is pinned to :1 so that the systemd units (DISPLAY=:1) match.
+if [[ -z $DISPLAY ]] && [[ $(tty) == /dev/tty1 ]]; then
+  exec startx -- :1
+fi

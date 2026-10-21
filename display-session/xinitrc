@@ -1,0 +1,26 @@
+#!/bin/bash
+# X session for the office display.
+#
+# This script only brings up X and the window manager. The photo frame itself
+# is supervised by systemd (photo-frame-rs.service), so it survives crashes and
+# can be restarted without touching the X session.
+
+# Disable screen blanking / screensaver.
+xset s off
+xset -dpms
+xset s noblank
+
+# Enable the connected output at 4K60.
+for output in HDMI-1 HDMI-2 HDMI-3 DP-1; do
+  if xrandr | grep -q "^$output connected"; then
+    xrandr --output "$output" --mode 3840x2160 --rate 60 --primary
+    break
+  fi
+done
+
+openbox &
+unclutter -idle 3 -root &
+sleep 2
+
+# Keep startx/X alive; the display application is supervised by systemd.
+exec sleep infinity

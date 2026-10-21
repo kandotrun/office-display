@@ -1,0 +1,28 @@
+[Unit]
+Description=Presence-reactive dimming for the 2F photo frame
+After=camera-gaze-rs.service
+Wants=camera-gaze-rs.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=@USER@
+Group=@USER@
+WorkingDirectory=@HOME@/presence-dimmer
+Environment=DISPLAY=:1
+Environment=XAUTHORITY=@HOME@/.Xauthority
+Environment=PRESENCE_OUTPUT=HDMI-2
+Environment=PRESENCE_IDLE_SECONDS=300
+Environment=PRESENCE_DIM=0.25
+# X is started by the tty1 autologin session, outside systemd target ordering.
+ExecStartPre=/usr/bin/timeout 120 /bin/sh -c "until [ -S /tmp/.X11-unix/X1 ]; do sleep 0.5; done"
+ExecStart=/usr/bin/python3 -u @HOME@/presence-dimmer/presence_dimmer.py
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateDevices=yes
+
+[Install]
+WantedBy=graphical.target

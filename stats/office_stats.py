@@ -19,7 +19,7 @@ import sqlite3
 import threading
 import time
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 SURVEY_STATUS = os.environ.get("STATS_SURVEY_URL", "http://127.0.0.1:8094/status")
@@ -28,6 +28,7 @@ PORT = int(os.environ.get("STATS_PORT", "8095"))
 DB_PATH = os.environ.get("STATS_DB", os.path.expanduser("~/office-stats/stats.db"))
 POLL_SECONDS = float(os.environ.get("STATS_POLL_SECONDS", "10"))
 RETENTION_DAYS = int(os.environ.get("STATS_RETENTION_DAYS", "120"))
+ACTIVE_MOTION = float(os.environ.get("STATS_ACTIVE_MOTION", "1.5"))
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS samples (
@@ -163,6 +164,69 @@ def today_profile():
     return profile
 
 
+def day_report():
+    """Everything the daily report card shows, for today."""
+    now = datetime.now()
+    start = int(now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+    end = start + 86400
+    hourly = rows(
+        """
+        SELECT CAST(strftime('%H', ts, 'unixepoch', 'localtime') AS INTEGER) AS hour,
+               AVG(motion) AS motion, AVG(db) AS db, MAX(db_peak) AS db_peak,
+               MAX(faces) AS faces, COUNT(*) AS minutes
+        FROM samples WHERE ts >= ? AND ts < ? GROUP BY hour ORDER BY hour
+        """,
+        (start, end),
+    )
+    hours = [None for _ in range(24)]
+    for r in hourly:
+        hours[r["hour"]] = {
+            "motion": round(r["motion"], 3),
+            "db": round(r["db"], 1),
+            "db_peak": round(r["db_peak"], 1),
+            "faces": r["faces"],
+            "minutes": r["minutes"],
+        }
+    used = [(h, v) for h, v in enumerate(hours) if v and v["minutes"] >= 2]
+    # Comparing hours needs more than one hour of data to mean anything.
+    comparable = len(used) >= 3
+    busiest = max(used, key=lambda hv: hv[1]["motion"]) if comparable else None
+    quietest = min(used, key=lambda hv: hv[1]["motion"]) if comparable else None
+
+    minutes = rows(
+        "SELECT motion FROM samples WHERE ts >= ? AND ts < ? ORDER BY ts",
+        (start, end),
+    )
+    active_minutes = sum(1 for m in minutes if m["motion"] >= ACTIVE_MOTION)
+    total_minutes = len(minutes)
+
+    last_week_day = now - timedelta(days=7)
+    lw_start = int(last_week_day.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+    lw = rows(
+        "SELECT AVG(motion) AS motion, COUNT(*) AS minutes FROM samples WHERE ts >= ? AND ts < ?",
+        (lw_start, lw_start + 86400),
+    )
+    last_week = None
+    if lw and lw[0]["minutes"] >= 30 and total_minutes >= 30:
+        today_avg = sum(m["motion"] for m in minutes) / total_minutes
+        if lw[0]["motion"]:
+            last_week = round(today_avg / lw[0]["motion"], 2)
+
+    return {
+        "date": now.strftime("%Y-%m-%d"),
+        "weekday": now.strftime("%a"),
+        "hours": hours,
+        "busiest": None if not busiest else {"hour": busiest[0], "motion": busiest[1]["motion"]},
+        "quietest": None if not quietest else {"hour": quietest[0], "motion": quietest[1]["motion"]},
+        "first_hour": used[0][0] if used else None,
+        "last_hour": used[-1][0] if used else None,
+        "active_minutes": active_minutes,
+        "total_minutes": total_minutes,
+        "peak_db": max((v["db_peak"] for h, v in used), default=None),
+        "last_week": last_week,
+    }
+
+
 def recent(minutes):
     since = int(time.time()) - minutes * 60
     return rows(
@@ -195,6 +259,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"grid": week_grid(), "now": datetime.now().isoformat(timespec="seconds")})
         elif path == "/stats/today":
             self.send_json({"hours": today_profile(), "now": datetime.now().isoformat(timespec="seconds")})
+        elif path == "/stats/report":
+            self.send_json(day_report())
         elif path == "/stats/recent":
             minutes = 60
             if "minutes=" in self.path:

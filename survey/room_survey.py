@@ -26,6 +26,9 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 CAMERA_URL = os.environ.get("SURVEY_CAMERA_URL", "http://127.0.0.1:8082/snapshot.jpg")
 FACES_URL = os.environ.get("SURVEY_FACES_URL", "http://127.0.0.1:8093/status")
 STATS_URL = os.environ.get("SURVEY_STATS_URL", "http://127.0.0.1:8095/stats/week")
+REPORT_URL = os.environ.get("SURVEY_REPORT_URL", "http://127.0.0.1:8095/stats/report")
+REPORT_AT = os.environ.get("SURVEY_REPORT_AT", "18:30")
+REPORT_SECONDS = float(os.environ.get("SURVEY_REPORT_SECONDS", "25"))
 PORT = int(os.environ.get("SURVEY_PORT", "8094"))
 W = int(os.environ.get("SURVEY_WIDTH", "720"))
 H = int(os.environ.get("SURVEY_HEIGHT", "720"))
@@ -60,6 +63,7 @@ def load_font(size):
 
 
 BIG = load_font(21)
+HUGE = load_font(46)
 SMALL = load_font(13)
 
 
@@ -160,6 +164,7 @@ LATEST = Latest()
 AUDIO = Audio()
 STATE = {"motion": 0.0, "faces": 0, "db": -90.0}
 STATS = {"grid": None, "at": 0.0}
+REPORT = {"until": 0.0, "data": None, "last_date": None}
 
 
 def fetch_stats():
@@ -318,6 +323,98 @@ def render(gray, motion, spec, db, faces, t):
     return img
 
 
+def report_due(now):
+    try:
+        hh, mm = (int(part) for part in REPORT_AT.split(":"))
+    except ValueError:
+        return False
+    return now.hour == hh and now.minute == mm and REPORT["last_date"] != now.date()
+
+
+def fetch_report():
+    try:
+        with urllib.request.urlopen(REPORT_URL, timeout=3) as response:
+            return json.loads(response.read())
+    except Exception:
+        return None
+
+
+def render_report(rep):
+    """The once-a-day summary: activity bars plus the day's extremes."""
+    img = Image.new("RGB", (W, H), BG)
+    draw = ImageDraw.Draw(img, "RGBA")
+    for x in range(0, W, 48):
+        draw.line([(x, 0), (x, H)], fill=(255, 255, 255, 7))
+    for y in range(0, H, 48):
+        draw.line([(0, y), (W, y)], fill=(255, 255, 255, 7))
+
+    header_h = int(H * 0.13)
+    draw.rectangle([0, 0, W, header_h], fill=BG)
+    draw.line([(48, header_h), (W - 48, header_h)], fill=CONTOUR + (55,), width=1)
+    draw.text((48, 18), "TODAY", font=BIG, fill=TEXT)
+    draw.text((W - 48, 24), "%s  %s" % (rep["date"], rep["weekday"]), font=SMALL, fill=DIM, anchor="ra")
+
+    minutes = int(rep.get("active_minutes") or 0)
+    hours, mins = divmod(minutes, 60)
+    big = "%dh %02dm" % (hours, mins) if hours else "%dm" % mins
+    draw.text((48, header_h + 22), "ACTIVE TIME", font=SMALL, fill=CONTOUR)
+    draw.text((48, header_h + 42), big, font=HUGE, fill=TEXT)
+
+    last_week = rep.get("last_week")
+    draw.text((W - 48, header_h + 22), "VS LAST WEEK", font=SMALL, fill=CONTOUR, anchor="ra")
+    draw.text(
+        (W - 48, header_h + 42),
+        "-" if last_week is None else "%.1fx" % last_week,
+        font=HUGE,
+        fill=ACCENT if (last_week or 0) >= 1.15 else TEXT,
+        anchor="ra",
+    )
+
+    top = header_h + 150
+    bottom = top + 180
+    width = (W - 96) / 24.0
+    values = [h["motion"] if h else 0.0 for h in rep["hours"]]
+    peak = max(values) or 1.0
+    busiest = (rep.get("busiest") or {}).get("hour")
+    for hour, h in enumerate(rep["hours"]):
+        x = 48 + hour * width
+        if not h:
+            continue
+        v = min(1.0, (h["motion"] / peak) ** 0.6)
+        color = ACCENT if hour == busiest else FOOT
+        alpha = 235 if hour == busiest else 150
+        draw.rectangle([x + 2, bottom - v * 180, x + width - 4, bottom], fill=color + (alpha,))
+    draw.line([(48, bottom), (W - 48, bottom)], fill=FOOT + (80,), width=1)
+    if int(rep.get("total_minutes") or 0) < 60:
+        draw.text(
+            (W / 2, top + 60),
+            "COLLECTING - %d MINUTES SO FAR" % int(rep.get("total_minutes") or 0),
+            font=SMALL,
+            fill=DIM,
+            anchor="mm",
+        )
+    for hour in range(0, 24, 6):
+        draw.text((48 + hour * width, bottom + 8), "%02d" % hour, font=SMALL, fill=DIM)
+
+    stats = [
+        ("BUSIEST", "-" if busiest is None else "%02d:00" % busiest),
+        ("QUIETEST", "-" if not rep.get("quietest") else "%02d:00" % rep["quietest"]["hour"]),
+        ("PEAK AUDIO", "-" if rep.get("peak_db") is None else "%.0f dBFS" % rep["peak_db"]),
+        ("MINUTES", "%d" % int(rep.get("total_minutes") or 0)),
+    ]
+    column = (W - 96) // 2
+    for i, (key, value) in enumerate(stats):
+        x = 48 + (i % 2) * column
+        y = bottom + 40 + (i // 2) * 74
+        draw.text((x, y), key, font=SMALL, fill=CONTOUR)
+        draw.text((x, y + 16), value, font=BIG, fill=TEXT)
+
+    draw.line([(48, H - 62), (W - 48, H - 62)], fill=CONTOUR + (55,), width=1)
+    draw.text((48, H - 46), "DAILY REPORT / 2F DISPLAY", font=SMALL, fill=DIM)
+    draw.text((W - 48, H - 46), "ACTIVE = MOTION >= 1.5", font=SMALL, fill=DIM, anchor="ra")
+    return img
+
+
 def loop():
     previous_small = None
     motion = np.zeros((GRID[1], GRID[0]), dtype=np.float32)
@@ -353,7 +450,17 @@ def loop():
             last_face_poll = now
         db, spec = AUDIO.read()
 
-        img = render(frame, motion, spec, db, last_faces, now)
+        wall = datetime.now()
+        if report_due(wall):
+            data = fetch_report()
+            if data:
+                REPORT["data"] = data
+                REPORT["until"] = time.monotonic() + REPORT_SECONDS
+                REPORT["last_date"] = wall.date()
+        if REPORT["data"] is not None and time.monotonic() < REPORT["until"]:
+            img = render_report(REPORT["data"])
+        else:
+            img = render(frame, motion, spec, db, last_faces, now)
         buf = io.BytesIO()
         img.save(buf, "JPEG", quality=JPEG_QUALITY)
         seq += 1

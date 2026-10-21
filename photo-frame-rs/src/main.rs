@@ -312,16 +312,19 @@ fn live_tile_placement<'a>(scene: &'a Scene, aspect: f32) -> Option<&'a layout::
     } else {
         16. / 9.
     };
+    // Shape matters more than size here: a square artwork in a tall card wastes
+    // most of the card, so prefer the card whose shape is closest to the source.
+    let score = |p: &layout::Placement| {
+        let card_aspect = (p.card.w / p.card.h.max(1.0)).max(0.01);
+        let shape = 1.0 / (1.0 + (card_aspect / aspect).ln().abs());
+        let size = (p.card.area() / max_area).sqrt();
+        shape * 0.75 + size * 0.25
+    };
     scene
         .layout
         .placements
         .iter()
-        .filter(|p| p.card.area() >= max_area * 0.85)
-        .min_by(|a, b| {
-            let da = (a.card.w / a.card.h.max(1.0) - aspect).abs();
-            let db = (b.card.w / b.card.h.max(1.0) - aspect).abs();
-            da.total_cmp(&db)
-        })
+        .max_by(|a, b| score(a).total_cmp(&score(b)))
 }
 
 fn live_badge(painter: &egui::Painter, card: egui::Rect, now: f64) {

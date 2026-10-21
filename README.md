@@ -28,6 +28,9 @@
                     │        ▲                                           │
                     │        │ GET /status (faces, healthy, age)         │
                     │  presence-dimmer ── xrandr --brightness ──▶ HDMI   │
+                    │                                                    │
+                    │  office-stats (loopback :8095)                      │
+                    │   1分ごとの集約をSQLiteへ / 週間グリッドを返す      │
                     └────────────────────────────────────────────────────┘
 ```
 
@@ -120,6 +123,25 @@ curl -s http://127.0.0.1:8096/status | jq .
 - `GET /stream` がMJPEG、`GET /frame.jpg` が静止画、`GET /status` が計測値
 
 MJPEGの各パートには `X-Frame-Sequence` と RFC3339 の `X-Frame-Timestamp` が必要です（アプリ側が検証します）。時刻は3秒以内でなければ捨てられます。
+
+## office-stats
+
+表示機がすでに測っている値を、1分単位の集約として残します。
+
+| 列 | 内容 |
+|---|---|
+| `motion` / `motion_peak` | 動きの平均と最大 |
+| `db` / `db_peak` | 音量の平均と最大 |
+| `faces` | その1分で観測した最大の顔数 |
+| `n` | その1分に入ったサンプル数（10秒ごと） |
+
+**保存しないもの**: 画像、音声、顔の位置、個人の識別。行は「分」と集約値だけで、誰がいたかは残りません。
+
+- 保存先: `~/office-stats/stats.db`（SQLite）
+- 保持: 既定120日
+- API: `/stats/today`、`/stats/week`（7x24グリッド）、`/stats/recent?minutes=N`、`/status`
+
+計測図の下部にはこの週間グリッドが表示されます。データが溜まるまでは空セルのままなので、**数日動かして初めて意味が出ます**。「VS USUAL」もその曜日・時刻のサンプルが20分以上ないうちは `-` を表示します。
 
 ## 配備
 

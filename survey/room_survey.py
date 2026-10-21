@@ -11,6 +11,7 @@ It is published as an MJPEG stream so the photo frame can use it as its live
 tile. No image is written to disk; the previous frame is kept in memory only.
 """
 import io
+import json
 import os
 import subprocess
 import threading
@@ -24,6 +25,7 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 CAMERA_URL = os.environ.get("SURVEY_CAMERA_URL", "http://127.0.0.1:8082/snapshot.jpg")
 FACES_URL = os.environ.get("SURVEY_FACES_URL", "http://127.0.0.1:8093/status")
+STATS_URL = os.environ.get("SURVEY_STATS_URL", "http://127.0.0.1:8095/stats/week")
 PORT = int(os.environ.get("SURVEY_PORT", "8094"))
 W = int(os.environ.get("SURVEY_WIDTH", "720"))
 H = int(os.environ.get("SURVEY_HEIGHT", "720"))
@@ -57,7 +59,7 @@ def load_font(size):
     return ImageFont.load_default()
 
 
-BIG = load_font(24)
+BIG = load_font(21)
 SMALL = load_font(13)
 
 
@@ -157,6 +159,20 @@ class Latest:
 LATEST = Latest()
 AUDIO = Audio()
 STATE = {"motion": 0.0, "faces": 0, "db": -90.0}
+STATS = {"grid": None, "at": 0.0}
+
+
+def fetch_stats():
+    """Weekly activity grid; refreshed in the background so rendering never waits."""
+    while True:
+        try:
+            with urllib.request.urlopen(STATS_URL, timeout=3) as response:
+                data = json.loads(response.read())
+            STATS["grid"] = data.get("grid")
+            STATS["at"] = time.time()
+        except Exception:
+            pass
+        time.sleep(60)
 
 
 def fetch_snapshot():
@@ -170,9 +186,7 @@ def fetch_snapshot():
 def fetch_faces():
     try:
         with urllib.request.urlopen(FACES_URL, timeout=2) as response:
-            data = response.read()
-        import json
-        status = json.loads(data)
+            status = json.loads(response.read())
         if status.get("healthy"):
             return int(status.get("detected_faces") or 0)
     except Exception:
@@ -190,13 +204,40 @@ def motion_grid(current, previous, decay):
     return cells.astype(np.float32), small
 
 
+def heatmap(draw, grid, x0, y0, cw, chh, now_hour):
+    """7x24 activity grid; empty cells stay dark so 'no data yet' is visible."""
+    top = 0.0
+    for row in grid or []:
+        for cell in row:
+            if cell:
+                top = max(top, cell["motion"])
+    scale = max(top, 1.0)
+    for wd in range(7):
+        for hr in range(24):
+            cell = grid[wd][hr] if grid else None
+            if not cell:
+                fill = (255, 255, 255, 14)
+            else:
+                v = min(1.0, (cell["motion"] / scale) ** 0.55)
+                fill = (
+                    int(16 + (255 - 16) * v),
+                    int(22 + (150 - 22) * v),
+                    int(30 + (60 - 30) * v),
+                    int(60 + 180 * v),
+                )
+            box = [x0 + hr * cw, y0 + wd * chh, x0 + hr * cw + cw - 2, y0 + wd * chh + chh - 2]
+            draw.rectangle(box, fill=fill)
+            if hr == now_hour:
+                draw.rectangle(box, outline=CONTOUR + (60,))
+
+
 def render(gray, motion, spec, db, faces, t):
     img = Image.new("RGB", (W, H), BG)
     draw = ImageDraw.Draw(img, "RGBA")
 
-    for x in range(0, W, 50):
+    for x in range(0, W, 48):
         draw.line([(x, 0), (x, H)], fill=(255, 255, 255, 7))
-    for y in range(0, H, 50):
+    for y in range(0, H, 48):
         draw.line([(0, y), (W, y)], fill=(255, 255, 255, 7))
 
     smooth = gray.filter(ImageFilter.GaussianBlur(6))
@@ -223,31 +264,57 @@ def render(gray, motion, spec, db, faces, t):
             elif m > 0.9:
                 draw.ellipse([cx - 2, cy - 2, cx + 2, cy + 2], fill=ACCENT + (70,))
 
-    draw.rectangle([0, 0, W, int(H * 0.14)], fill=BG)
-    draw.line([(48, int(H * 0.14)), (W - 48, int(H * 0.14))], fill=CONTOUR + (55,), width=1)
-    draw.rectangle([0, H - int(H * 0.30), W, H], fill=BG)
-    draw.line([(48, H - int(H * 0.30)), (W - 48, H - int(H * 0.30))], fill=FOOT + (55,), width=1)
+    header_h = int(H * 0.13)
+    footer_top = int(H * 0.55)
+    draw.rectangle([0, 0, W, header_h], fill=BG)
+    draw.line([(48, header_h), (W - 48, header_h)], fill=CONTOUR + (55,), width=1)
+    draw.rectangle([0, footer_top, W, H], fill=BG)
+    draw.line([(48, footer_top), (W - 48, footer_top)], fill=FOOT + (55,), width=1)
 
-    base_y = H - int(H * 0.06)
+    # spectrum (top half of the footer)
+    base_y = footer_top + int(H * 0.20)
     xs = np.linspace(48, W - 48, BANDS)
-    ys = base_y - spec * (H * 0.16)
+    ys = base_y - spec * (H * 0.12)
     for x, y, v in zip(xs, ys, spec):
         draw.line([(x, base_y), (x, y)], fill=FOOT + (int(22 + 70 * v),), width=2)
     draw.line(list(zip(xs, ys)), fill=FOOT + (235,), width=2)
     draw.line([(48, base_y), (W - 48, base_y)], fill=FOOT + (80,), width=1)
 
+    # weekly activity grid (bottom half of the footer)
+    grid = STATS["grid"]
+    cell_w, cell_h = 19, 15
+    hx = (W - cell_w * 24 + 18) // 2
+    hy = base_y + int(H * 0.05)
+    heatmap(draw, grid, hx, hy, cell_w, cell_h, datetime.now().hour)
+    for wd, label in enumerate(("S", "M", "T", "W", "T", "F", "S")):
+        draw.text((hx - 8, hy + wd * cell_h + cell_h // 2 - 1), label,
+                  font=SMALL, fill=DIM, anchor="rm")
+    draw.text((hx, hy + cell_h * 7 + 6), "28 DAYS / ACTIVITY", font=SMALL, fill=DIM)
+    for hr in (0, 6, 12, 18):
+        draw.text((hx + hr * cell_w, hy - 16), "%02d" % hr, font=SMALL, fill=DIM)
+
+    # "vs usual": current activity against this weekday/hour average
+    usual = None
+    if grid:
+        sqlite_wd = (datetime.now().weekday() + 1) % 7
+        cell = grid[sqlite_wd][datetime.now().hour]
+        # one or two minutes is not a baseline; wait for a real sample
+        if cell and cell.get("motion") and cell.get("minutes", 0) >= 20:
+            usual = peak / cell["motion"]
     items = [
         ("MOTION", "%.2f" % peak),
         ("AUDIO", "%.0f dBFS" % db),
         ("BANDS", "%d" % BANDS),
         ("FACES", "%d" % faces),
+        ("VS USUAL", "-" if usual is None else "%.1fx" % usual),
     ]
     for i, (key, value) in enumerate(items):
         x = 48 + i * (W - 96) // len(items)
-        draw.text((x, 24), key, font=SMALL, fill=CONTOUR)
-        draw.text((x, 44), value, font=BIG, fill=TEXT)
-    draw.text((48, H - int(H * 0.30) + 12), "2F DISPLAY / LIVE ANALYSIS", font=SMALL, fill=DIM)
-    draw.text((W - 48, H - int(H * 0.30) + 12), "SPECTRUM 40Hz-8kHz", font=SMALL, fill=DIM, anchor="ra")
+        draw.text((x, 16), key, font=SMALL, fill=CONTOUR)
+        draw.text((x, 34), value, font=BIG, fill=TEXT)
+
+    draw.text((48, footer_top + 8), "2F DISPLAY / LIVE ANALYSIS", font=SMALL, fill=DIM)
+    draw.text((W - 48, footer_top + 8), "SPECTRUM 40Hz-8kHz", font=SMALL, fill=DIM, anchor="ra")
     return img
 
 
@@ -353,6 +420,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     AUDIO.start()
+    threading.Thread(target=fetch_stats, name="stats", daemon=True).start()
     threading.Thread(target=loop, name="render", daemon=True).start()
     server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     print("room-survey on 127.0.0.1:%d (%dx%d @ %.0ffps)" % (PORT, W, H, FPS), flush=True)

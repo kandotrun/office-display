@@ -1,0 +1,26 @@
+[Unit]
+Description=Office activity statistics for the 2F display
+After=room-survey.service
+Wants=room-survey.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=@USER@
+Group=@USER@
+WorkingDirectory=@HOME@/office-stats
+Environment=STATS_PORT=8095
+Environment=STATS_DB=@HOME@/office-stats/stats.db
+Environment=STATS_RETENTION_DAYS=120
+# Needs an interpreter with sqlite3 (the standard library is enough).
+ExecStart=@PYTHON@ -u @HOME@/office-stats/office_stats.py
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=@HOME@/office-stats
+PrivateTmp=yes
+
+[Install]
+WantedBy=graphical.target

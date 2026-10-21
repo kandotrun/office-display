@@ -49,7 +49,7 @@ pub fn decode(bytes: &[u8], backdrop: bool, camera: bool) -> Result<DecodedPhoto
     original.apply_orientation(orientation);
     let aspect = original.width() as f32 / original.height() as f32;
     let (uw, uh) = if camera {
-        (640, 360)
+        (1280, 720)
     } else {
         (UPLOAD_WIDTH, UPLOAD_HEIGHT)
     };

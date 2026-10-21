@@ -216,7 +216,7 @@ impl PreviewStream {
         )
         .into_dimensions()
         .map_err(|_| "preview_jpeg_dimensions")?;
-        if w == 0 || h == 0 || w > 640 || h > 360 {
+        if w == 0 || h == 0 || w > 1280 || h > 720 {
             return Err("preview_dimensions_limit");
         }
         let photo = decode::decode(&response.body, false, true)?;

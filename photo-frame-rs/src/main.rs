@@ -28,6 +28,7 @@ struct Config {
     fullscreen: bool,
     camera: bool,
     live_tile: bool,
+    camera_port: u16,
     gestures: bool,
     gesture_controls: bool,
     backdrops: bool,
@@ -41,6 +42,7 @@ impl Default for Config {
             fullscreen: false,
             camera: false,
             live_tile: false,
+            camera_port: 8082,
             gestures: false,
             gesture_controls: false,
             backdrops: true,
@@ -65,6 +67,13 @@ fn config_from(args: impl IntoIterator<Item = String>) -> Result<Option<Config>,
                 c.camera = true;
             }
             "--no-live-tile" => c.live_tile = false,
+            "--camera-port" => {
+                c.camera_port = args
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .filter(|p| *p >= 1024)
+                    .ok_or("invalid_camera_port")?;
+            }
             "--gesture-controls" => {
                 c.gesture_controls = true;
                 c.gestures = true;
@@ -101,7 +110,7 @@ fn config_from(args: impl IntoIterator<Item = String>) -> Result<Option<Config>,
             }
             "--help" => {
                 println!(
-                    "Native Rust photo-frame prototype\n--fullscreen (default: windowed)\n--camera | --no-camera (default: disabled; shared loopback 640x360 MJPEG at source rate, target 15fps)\n--live-tile | --no-live-tile (draw the live camera into the largest collage card instead of the corner preview; implies camera)\n--run-seconds 1..3600 (automatic window close)\n--status-port 8096 or 8098..8199 (GET /health /status, loopback only)\n--scale 0.75..3 (physical pixels per logical egui point; default 1)\n--no-backdrops (disable small RAM-only blurred covers)\n--gestures (display-only overlay; implies camera mirror)\n--gesture-controls (explicit native photo navigation: screen left=next,right=previous; implies gestures/camera)\n--no-gesture-controls (display only)\nPhoto source fixed: loopback 8081. No external URLs, credential, file input, HTTP write controls, video or gaze."
+                    "Native Rust photo-frame prototype\n--fullscreen (default: windowed)\n--camera | --no-camera (default: disabled; shared loopback MJPEG at source rate, target 15fps)\n--camera-port N (loopback MJPEG source port; default 8082)\n--live-tile | --no-live-tile (draw the live camera into the largest collage card instead of the corner preview; implies camera)\n--run-seconds 1..3600 (automatic window close)\n--status-port 8096 or 8098..8199 (GET /health /status, loopback only)\n--scale 0.75..3 (physical pixels per logical egui point; default 1)\n--no-backdrops (disable small RAM-only blurred covers)\n--gestures (display-only overlay; implies camera mirror)\n--gesture-controls (explicit native photo navigation: screen left=next,right=previous; implies gestures/camera)\n--no-gesture-controls (display only)\nPhoto source fixed: loopback 8081. No external URLs, credential, file input, HTTP write controls, video or gaze."
                 );
                 return Ok(None);
             }
@@ -269,6 +278,22 @@ fn paint_scene(
     }
     draws
 }
+/// Fit a rect inside a box without cropping (letterbox).
+fn contain_rect(box_: egui::Rect, aspect: f32) -> egui::Rect {
+    let aspect = if aspect.is_finite() && aspect > 0.0 {
+        aspect
+    } else {
+        16.0 / 9.0
+    };
+    let mut w = box_.width();
+    let mut h = w / aspect;
+    if h > box_.height() {
+        h = box_.height();
+        w = h * aspect;
+    }
+    egui::Rect::from_center_size(box_.center(), Vec2::new(w, h))
+}
+
 /// Pick the collage card that the live camera should occupy: the largest card,
 /// preferring one whose shape is closest to the camera's aspect so the crop is
 /// gentle.
@@ -794,11 +819,16 @@ impl eframe::App for App {
                         {
                             {
                                 let card = rect(placement.card, origin);
-                                let target = card.shrink(8.0);
+                                let size = texture.size_vec2();
+                                let target = contain_rect(
+                                    card.shrink(8.0),
+                                    size.x / size.y.max(1.0),
+                                );
+                                painter.rect_filled(card, 12, Color32::from_rgb(7, 9, 13));
                                 painter.with_clip_rect(card.shrink(2.)).image(
                                     texture.id(),
                                     target,
-                                    cover_uv(texture.size_vec2(), target.size()),
+                                    cover_uv(size, target.size()),
                                     Color32::WHITE,
                                 );
                                 painter.rect_stroke(
@@ -1002,7 +1032,7 @@ fn run(config: Config) -> Result<(), &'static str> {
     runtime.handles.push(handle);
     let camera_wake: worker::CameraWake = Arc::new(Mutex::new(None));
     let camera_slot = if config.camera {
-        let (slot, handle) = worker::start_camera(stop.clone(), camera_wake.clone())
+        let (slot, handle) = worker::start_camera(stop.clone(), camera_wake.clone(), config.camera_port)
             .map_err(|_| "camera_worker_failed")?;
         runtime.handles.push(handle);
         Some(slot)

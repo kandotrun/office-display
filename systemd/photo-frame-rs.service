@@ -22,7 +22,7 @@ Environment=MESA_SHADER_CACHE_DISABLE=true
 ExecStartPre=/usr/bin/install -d -m 0700 /run/photo-frame-rs/tmp /run/photo-frame-rs/cache /run/photo-frame-rs/config
 # X is started by the tty1 autologin session, outside systemd target ordering.
 ExecStartPre=/usr/bin/timeout 120 /bin/sh -c "until [ -S /tmp/.X11-unix/X1 ]; do sleep 0.5; done"
-ExecStart=@APP_ROOT@/current/bin/photo-frame-rs --fullscreen --scale 2 --live-tile --status-port 8096
+ExecStart=@APP_ROOT@/current/bin/photo-frame-rs --fullscreen --scale 2 --live-tile --camera-port 8094 --status-port 8096
 Restart=always
 RestartSec=3
 CPUQuota=120%

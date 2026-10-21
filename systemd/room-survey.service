@@ -1,0 +1,30 @@
+[Unit]
+Description=Room survey art stream for the 2F display
+After=meetup-camera.service
+Wants=meetup-camera.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=@USER@
+Group=@USER@
+WorkingDirectory=@HOME@/room-survey
+Environment=SURVEY_PORT=8094
+Environment=SURVEY_AUDIO_DEVICE=@AUDIO_DEVICE@
+Environment=SURVEY_FPS=8
+Environment=SURVEY_WIDTH=720
+Environment=SURVEY_HEIGHT=720
+# Needs an interpreter with numpy and Pillow.
+ExecStart=@PYTHON@ -u @HOME@/room-survey/room_survey.py
+Restart=always
+RestartSec=3
+PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+# /dev/snd is a directory; DeviceAllow only accepts device nodes or classes.
+DevicePolicy=closed
+DeviceAllow=char-alsa rw
+
+[Install]
+WantedBy=graphical.target

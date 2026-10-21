@@ -18,11 +18,13 @@
                     │        ▲                                           │
                     │        │ GET /api/photos, /photos/<name>           │
                     │  photo-frame-rs ──────────────┐                    │
-                    │   (fullscreen / OpenGL)       │ live camera tile    │
-                    │                               ▼                    │
-                    │  camera  (loopback :8082) ── MJPEG ──┐              │
-                    │                                      │              │
-                    │  face detector (loopback :8093) ◀────┘              │
+                    │   (fullscreen / OpenGL)       │ live tile          │
+                    │                               ▲                    │
+                    │  room-survey (loopback :8094)│ 解析と描画         │
+                    │        ▲            ▲         │                    │
+                    │        │            │         │                    │
+                    │  camera (8082)   mic (ALSA)   │                    │
+                    │  face detector (loopback :8093) ─┘                 │
                     │        ▲                                           │
                     │        │ GET /status (faces, healthy, age)         │
                     │  presence-dimmer ── xrandr --brightness ──▶ HDMI   │
@@ -44,11 +46,16 @@
 | `--fullscreen` | 全画面表示 |
 | `--scale N` | 論理ピクセル比（4Kなら `2`） |
 | `--camera` / `--no-camera` | 右下のカメラプレビュー |
-| `--live-tile` / `--no-live-tile` | カメラ映像をコラージュの1枚として描く（`--camera` を含意） |
+| `--live-tile` / `--no-live-tile` | ライブ映像をコラージュの1枚として描く（`--camera` を含意） |
+| `--camera-port N` | ライブ映像の取得先ポート（既定 8082、`room-survey` は 8094） |
 | `--status-port 8096` | `GET /health` `/status`（ループバック限定） |
 | `--run-seconds N` | 自動終了（動作確認用） |
 
-`--live-tile` は、いちばん大きなカードを選び、カメラ映像をそのカードに収まるようにクロップして描きます。写真のレイアウト計算には手を入れず、描画だけを差し替えるので、レイアウトの不変条件を壊しません。
+`--live-tile` は、いちばん大きなカードを選び、そこにライブ映像を描きます。写真のレイアウト計算には手を入れず、描画だけを差し替えるので、レイアウトの不変条件を壊しません。
+
+- カードに合う写真は描画をスキップし、カードの下地だけを残します
+- 映像はアスペクトを保って収めます（contain）。切ると読み物として成立しないため
+- 取得先は `--camera-port` で切り替えられます（既定は生カメラ 8082、計測図は 8094）
 
 ### ビルド
 
@@ -95,6 +102,24 @@ curl -s http://127.0.0.1:8096/status | jq .
 | `PRESENCE_MOTION_DIFF` | `2.0` | 動きとみなす平均差分 |
 | `PRESENCE_STATUS_URL` | `http://127.0.0.1:8093/status` | 顔検出の状態 |
 | `PRESENCE_SNAPSHOT_URL` | `http://127.0.0.1:8082/snapshot.jpg` | 動き判定に使うスナップショット |
+
+## room-survey
+
+部屋の状態を「計測図」として描き、MJPEGで配信するサービスです。写真を加工するのではなく、解析結果を図にします。
+
+| 信号 | 取り方 | 図への出方 |
+|---|---|---|
+| 明るさ | カメラフレーム | 等高線（部屋が地形になる） |
+| 動き | フレーム差分 | 動いた場所にオレンジの輪 |
+| 音 | ALSA 16kHz → FFT 56帯域 | 下部のスペクトラム、計測値 |
+| 顔 | 顔検出の `/status` | 人数の表示（身元は見ない） |
+
+- 出力は **正方形 720x720**。ライブタイルのカードがほぼ正方形なので、余白なく収まります
+- カメラは正方形に中央クロップし、歪ませません
+- 音は絶対値ではなく**その瞬間のスペクトルの形**で正規化します（静かな部屋でも死なないため）
+- `GET /stream` がMJPEG、`GET /frame.jpg` が静止画、`GET /status` が計測値
+
+MJPEGの各パートには `X-Frame-Sequence` と RFC3339 の `X-Frame-Timestamp` が必要です（アプリ側が検証します）。時刻は3秒以内でなければ捨てられます。
 
 ## 配備
 

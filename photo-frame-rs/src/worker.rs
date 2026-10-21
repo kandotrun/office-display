@@ -504,15 +504,18 @@ pub type CameraWake = Arc<Mutex<Option<eframe::egui::Context>>>;
 pub fn start_camera(
     stop: Arc<AtomicBool>,
     wake: CameraWake,
+    port: u16,
 ) -> std::io::Result<(CameraSlot, JoinHandle<()>)> {
     let slot = Arc::new(Mutex::new(None));
     let producer = slot.clone();
     let handle = thread::Builder::new()
         .name("shared-mjpeg-preview".into())
         .spawn(move || {
-            let mut previous = None;
+            let mut previous;
             while !stop.load(Ordering::Relaxed) {
-                let mut stream = crate::mjpeg::PreviewStream::open(8082, &stop).ok();
+                // A reconnected producer may restart its sequence; accept it again.
+                previous = None;
+                let mut stream = crate::mjpeg::PreviewStream::open(port, &stop).ok();
                 loop {
                     if stop.load(Ordering::Relaxed) {
                         break;

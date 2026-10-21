@@ -12,8 +12,9 @@ WorkingDirectory=@HOME@/presence-dimmer
 Environment=DISPLAY=:1
 Environment=XAUTHORITY=@HOME@/.Xauthority
 Environment=PRESENCE_OUTPUT=HDMI-2
-Environment=PRESENCE_IDLE_SECONDS=300
-Environment=PRESENCE_DIM=0.25
+Environment=PRESENCE_IDLE_SECONDS=900
+Environment=PRESENCE_DIM=0.5
+Environment=PRESENCE_MOTION_DIFF=2.0
 # X is started by the tty1 autologin session, outside systemd target ordering.
 ExecStartPre=/usr/bin/timeout 120 /bin/sh -c "until [ -S /tmp/.X11-unix/X1 ]; do sleep 0.5; done"
 ExecStart=/usr/bin/python3 -u @HOME@/presence-dimmer/presence_dimmer.py

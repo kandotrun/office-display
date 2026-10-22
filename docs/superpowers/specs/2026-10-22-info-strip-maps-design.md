@@ -2,6 +2,15 @@
 
 Status: approved design, 2026-10-22
 
+Revised the same day after review on screen: the dark HUD look (mono labels,
+telemetry, brackets, scanlines, grid floor) was replaced with an art
+direction for a general audience — a painted sky that follows the sun and the
+weather, colour light drawn from the photos, floating white-bordered prints in
+3D, a frosted glass strip with a large thin clock, a tilted 3D map with a
+column of light, and a real-imagery globe. Location defaults are the
+Hiroshima office. The sections below still describe the data flow; where they
+mention the HUD styling, the README is authoritative.
+
 ## Goal
 
 Give the 2F display more character without taking the focus away from the

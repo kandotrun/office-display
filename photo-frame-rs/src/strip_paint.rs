@@ -1,25 +1,28 @@
-//! Painting for the info strip and the HUD chrome. Geometry and timing come
-//! from `strip`, `globe` and `theme`; this module only draws.
+//! Painting for the info strip: a glass panel with the clock, the weather, a
+//! living map card and the rain outlook. Geometry and timing come from
+//! `strip`, `globe`, `space` and `theme`; this module only draws.
 use crate::{
-    atlas, depth,
-    globe,
+    art::{self, glow, rgba},
+    atlas, depth, globe,
     space::{self, Camera, v3},
     strip::{self, Blocks, View, ViewFrame},
-    theme::{Mood, Palette, Rgb, Sun},
+    theme::{Mood, Palette, Rgb, Sun, mix},
 };
-use chrono::{DateTime, Datelike, Local, NaiveDate, Timelike, Utc};
+use chrono::{DateTime, Datelike, Local, NaiveDate, Timelike};
 use eframe::egui::{
-    self, Align2, Color32, FontId, Pos2, Rect, Shape, Stroke, StrokeKind, TextureHandle, Vec2,
+    self, Align2, Color32, FontFamily, FontId, Pos2, Rect, Shape, Stroke, StrokeKind, TextureHandle, Vec2,
     epaint,
 };
 
 pub const CREDITS: &str = "© OpenStreetMap contributors · 気象庁 · NASA GIBS";
+/// Thin Latin face for the big clock digits; bound in `hand_overlay::install_japanese_font`.
+pub const CLOCK_FAMILY: &str = "clock";
 
 pub fn color(rgb: Rgb) -> Color32 {
     Color32::from_rgb(rgb[0], rgb[1], rgb[2])
 }
 pub fn alpha(rgb: Rgb, a: f32) -> Color32 {
-    Color32::from_rgba_unmultiplied(rgb[0], rgb[1], rgb[2], (a.clamp(0.0, 1.0) * 255.0) as u8)
+    rgba(rgb, a)
 }
 pub fn japanese_date(date: NaiveDate) -> String {
     const DAYS: [&str; 7] = ["月", "火", "水", "木", "金", "土", "日"];
@@ -30,75 +33,56 @@ pub fn japanese_date(date: NaiveDate) -> String {
         DAYS[date.weekday().num_days_from_monday() as usize]
     )
 }
-/// "OBS -30" / "NOW" / "FCST +20" for radar frame `i` at 10 minute steps.
-pub fn frame_tag(i: usize, now_index: usize) -> String {
+/// "いま" / "30分前" / "20分後" for radar frame `i` at 10 minute steps.
+pub fn frame_label(i: usize, now_index: usize) -> String {
     let minutes = (i as i64 - now_index as i64) * 10;
     match minutes {
-        0 => "NOW".into(),
-        m if m < 0 => format!("OBS {m}"),
-        m => format!("FCST +{m}"),
+        0 => "いま".into(),
+        m if m < 0 => format!("{}分前", -m),
+        m => format!("{m}分後"),
     }
+}
+/// "2025-08" → "2025年8月".
+pub fn taken_label(taken: &str) -> Option<String> {
+    let (y, m) = taken.split_once('-')?;
+    let m: u32 = m.parse().ok().filter(|m| (1..=12).contains(m))?;
+    (y.len() == 4 && y.chars().all(|c| c.is_ascii_digit())).then(|| format!("{y}年{m}月"))
 }
 fn local_hm(at: &str) -> Option<String> {
     let t = DateTime::parse_from_rfc3339(at).ok()?;
     Some(t.with_timezone(&Local).format("%H:%M").to_string())
 }
-pub fn coords(lat: f64, lon: f64) -> String {
-    format!(
-        "{:.2}{} {:.2}{}",
-        lat.abs(),
-        if lat >= 0.0 { "N" } else { "S" },
-        lon.abs(),
-        if lon >= 0.0 { "E" } else { "W" }
-    )
-}
-/// Deterministic 0..1 noise for stars and flicker.
-fn hash(i: u32) -> f32 {
-    let mut x = i.wrapping_mul(0x9E37_79B9) ^ 0x85EB_CA6B;
-    x ^= x >> 15;
-    x = x.wrapping_mul(0x2C1B_3C6D);
-    x ^= x >> 12;
-    (x & 0xFFFF) as f32 / 65535.0
-}
-fn r(rect: crate::layout::Rect, origin: Pos2) -> Rect {
-    Rect::from_min_size(origin + Vec2::new(rect.x, rect.y), Vec2::new(rect.w, rect.h))
-}
-fn mono(size: f32) -> FontId {
-    FontId::monospace(size)
-}
 fn prop(size: f32) -> FontId {
     FontId::proportional(size)
 }
-
-/// L-shaped corner ticks, the main HUD motif.
-pub fn brackets(painter: &egui::Painter, rect: Rect, len: f32, stroke: Stroke) {
-    let len = len.min(rect.width() / 2.0).min(rect.height() / 2.0);
-    for (corner, dx, dy) in [
-        (rect.left_top(), 1.0, 1.0),
-        (rect.right_top(), -1.0, 1.0),
-        (rect.left_bottom(), 1.0, -1.0),
-        (rect.right_bottom(), -1.0, -1.0),
-    ] {
-        painter.line_segment([corner, corner + Vec2::new(dx * len, 0.0)], stroke);
-        painter.line_segment([corner, corner + Vec2::new(0.0, dy * len)], stroke);
-    }
+fn clock_font(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Name(CLOCK_FAMILY.into()))
 }
-/// Faint dot grid behind everything, drifting very slowly.
-pub fn backdrop(painter: &egui::Painter, rect: Rect, palette: &Palette, now: f64) {
-    let step = 32.0;
-    let drift = ((now * 2.0) % step as f64) as f32;
-    let dot = alpha(palette.border, 0.16);
-    let mut y = rect.top() + drift;
-    let mut row = 0;
-    while y < rect.bottom() {
-        let mut x = rect.left() + if row % 2 == 0 { 0.0 } else { step / 2.0 };
-        while x < rect.right() {
-            painter.circle_filled(Pos2::new(x, y), 0.8, dot);
-            x += step;
-        }
-        y += step;
-        row += 1;
-    }
+fn ease(t: f32) -> f32 {
+    space::ease_out(t)
+}
+/// Text with a soft dark halo so it reads on any sky.
+fn text(painter: &egui::Painter, at: Pos2, align: Align2, s: &str, font: FontId, c: Color32) {
+    let shade = Color32::from_black_alpha((c.a() as f32 * 0.35) as u8);
+    painter.text(at + Vec2::new(0.0, 1.5), align, s, font.clone(), shade);
+    painter.text(at, align, s, font, c);
+}
+/// Frosted glass: a translucent tinted fill, a hairline and a top highlight.
+pub fn glass(painter: &egui::Painter, rect: Rect, palette: &Palette, radius: u8, strength: f32) {
+    painter.rect_filled(rect, radius, rgba(palette.panel, 0.34 * strength));
+    painter.rect_stroke(rect, radius, Stroke::new(1.0, rgba([255, 255, 255], 0.16 * strength)), StrokeKind::Inside);
+    let r = radius as f32;
+    painter.line_segment(
+        [rect.left_top() + Vec2::new(r, 1.0), rect.right_top() + Vec2::new(-r, 1.0)],
+        Stroke::new(1.0, rgba([255, 255, 255], 0.22 * strength)),
+    );
+}
+fn pill(painter: &egui::Painter, at: Pos2, label: &str, size: f32, palette: &Palette, opacity: f32) -> Rect {
+    let galley = painter.layout_no_wrap(label.to_string(), prop(size), rgba(palette.text, opacity));
+    let r = Rect::from_min_size(at, galley.size() + Vec2::new(size * 1.2, size * 0.6));
+    painter.rect_filled(r, (r.height() / 2.0) as u8, rgba(palette.panel, 0.55 * opacity));
+    painter.galley(r.min + Vec2::new(size * 0.6, size * 0.3), galley, rgba(palette.text, opacity));
+    r
 }
 
 pub struct MapLayer<'a> {
@@ -107,7 +91,6 @@ pub struct MapLayer<'a> {
     pub frames: &'a [atlas::Frame],
     pub now_index: usize,
     pub office: [f32; 2],
-    pub office_coords: (f64, f64),
 }
 pub struct GlobeLayer<'a> {
     pub day: &'a TextureHandle,
@@ -120,7 +103,6 @@ pub struct GlobeLayer<'a> {
 pub struct PlaceLayer<'a> {
     pub map: &'a TextureHandle,
     pub place: &'a str,
-    pub coords: (f64, f64),
 }
 pub enum MapCard<'a> {
     Preparing,
@@ -128,22 +110,12 @@ pub enum MapCard<'a> {
     Globe(GlobeLayer<'a>),
     Place(PlaceLayer<'a>),
 }
-pub struct Telemetry<'a> {
-    pub office: (f64, f64),
-    pub sun: Sun,
-    pub phase: &'a str,
-    pub mood: Option<Mood>,
-    pub atlas_state: &'a str,
-    pub scene_id: u64,
-    pub photos: usize,
-    pub uptime: f64,
-}
 pub struct StripInfo<'a> {
     pub weather: Option<&'a atlas::Weather>,
     pub rain: Option<&'a atlas::Rain>,
-    /// When the rain series last changed, for the bar growth animation.
+    /// When the rain series last changed, for the growth animation.
     pub rain_since: f64,
-    pub telemetry: Telemetry<'a>,
+    pub sun_elevation: f64,
 }
 pub struct CardState<'a> {
     pub frame: Option<ViewFrame>,
@@ -152,6 +124,7 @@ pub struct CardState<'a> {
     pub ready: &'a [View],
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn paint_strip(
     painter: &egui::Painter,
     origin: Pos2,
@@ -164,120 +137,87 @@ pub fn paint_strip(
     info: &StripInfo<'_>,
 ) {
     let k = blocks.scale;
-    let panel = r(strip, origin);
-    painter.rect_filled(panel, 6, alpha(palette.surface, 0.78));
-    painter.rect_stroke(panel, 6, Stroke::new(1.0, alpha(palette.border, 0.45)), StrokeKind::Inside);
-    brackets(painter, panel.shrink(3.0), 18.0 * k, Stroke::new(1.5, alpha(palette.accent, 0.8)));
-    // A highlight that travels down the left edge.
-    let travel = ((now / 6.0) % 1.0) as f32;
-    let y = panel.top() + travel * panel.height();
-    for i in 0..24 {
-        let a = 0.5 * (1.0 - i as f32 / 24.0);
-        let yy = y - i as f32 * 3.0;
-        if yy > panel.top() {
-            painter.line_segment(
-                [Pos2::new(panel.left() + 0.5, yy), Pos2::new(panel.left() + 0.5, yy - 3.0)],
-                Stroke::new(2.0, alpha(palette.accent, a)),
-            );
-        }
-    }
-    paint_clock(painter, r(blocks.clock, origin), palette, clock, now, k);
-    paint_weather(painter, r(blocks.weather, origin), palette, info.weather, now, k);
-    paint_card(painter, r(blocks.map, origin), palette, now, k, card);
-    paint_telemetry(painter, r(blocks.telemetry, origin), palette, now, k, &info.telemetry);
-    paint_rain(painter, r(blocks.rain, origin), palette, now, k, info.rain, info.rain_since);
-    let footer = r(blocks.footer, origin);
-    painter.line_segment(
-        [footer.left_top(), footer.right_top()],
-        Stroke::new(1.0, alpha(palette.border, 0.4)),
-    );
-    painter.text(
-        footer.left_top() + Vec2::new(0.0, 8.0 * k),
-        Align2::LEFT_TOP,
-        "TSUQREA  ·  2F DISPLAY",
-        mono(13.0 * k),
-        color(palette.text),
-    );
-    painter.text(
-        footer.left_bottom(),
-        Align2::LEFT_BOTTOM,
-        CREDITS,
-        prop(10.5 * k),
-        color(palette.dim),
-    );
+    let r = |b: crate::layout::Rect| Rect::from_min_size(origin + Vec2::new(b.x, b.y), Vec2::new(b.w, b.h));
+    glass(painter, r(strip), palette, (18.0 * k) as u8, 1.0);
+    paint_clock(painter, r(blocks.clock), palette, clock, k);
+    paint_weather(painter, r(blocks.weather), palette, info, now, k);
+    paint_card(painter, r(blocks.map), palette, now, k, card);
+    paint_rain(painter, r(blocks.rain), palette, now, k, info.rain, info.rain_since);
+    let footer = r(blocks.footer);
+    text(painter, footer.left_top(), Align2::LEFT_TOP, "T S U Q R E A", prop(14.0 * k), rgba(palette.text, 0.9));
+    painter.text(footer.left_bottom(), Align2::LEFT_BOTTOM, CREDITS, prop(10.5 * k), rgba(palette.dim, 0.75));
 }
 
-fn label(painter: &egui::Painter, pos: Pos2, text: &str, palette: &Palette, k: f32) {
-    painter.text(pos, Align2::LEFT_TOP, text, mono(10.0 * k), alpha(palette.accent, 0.85));
-}
-
-fn paint_clock(painter: &egui::Painter, rect: Rect, palette: &Palette, clock: DateTime<Local>, now: f64, k: f32) {
-    label(painter, rect.left_top(), "LOCAL TIME", palette, k);
+fn paint_clock(painter: &egui::Painter, rect: Rect, palette: &Palette, clock: DateTime<Local>, k: f32) {
     let hm = clock.format("%H:%M").to_string();
-    let big = mono(58.0 * k);
-    let galley = painter.layout_no_wrap(hm, big, color(palette.text));
-    let at = rect.left_top() + Vec2::new(-2.0 * k, 12.0 * k);
-    let width = galley.size().x;
+    let galley = painter.layout_no_wrap(hm, clock_font(112.0 * k), color(palette.text));
+    let at = rect.left_top() + Vec2::new(-4.0 * k, -6.0 * k);
+    let size = galley.size();
+    painter.galley_with_override_text_color(at + Vec2::new(0.0, 2.5 * k), galley.clone(), Color32::from_black_alpha(60));
     painter.galley(at, galley, color(palette.text));
-    let blink = if clock.nanosecond() < 500_000_000 { 1.0 } else { 0.55 };
-    painter.text(
-        at + Vec2::new(width + 4.0 * k, 10.0 * k),
-        Align2::LEFT_TOP,
-        format!(":{:02}", clock.second()),
-        mono(22.0 * k),
-        alpha(palette.accent, blink),
-    );
-    painter.text(
-        rect.right_top() + Vec2::new(0.0, 14.0 * k),
-        Align2::RIGHT_TOP,
-        Utc::now().format("%H:%MZ").to_string(),
-        mono(13.0 * k),
-        color(palette.dim),
-    );
-    painter.text(
-        rect.right_top() + Vec2::new(0.0, 32.0 * k),
-        Align2::RIGHT_TOP,
-        format!("T+{:>7.0}", now),
-        mono(10.0 * k),
-        alpha(palette.dim, 0.7),
-    );
-    painter.text(
-        rect.left_bottom(),
+    // Seconds as a quiet ring that fills over the minute.
+    let c = Pos2::new(at.x + size.x + 26.0 * k, at.y + size.y * 0.42);
+    let rr = 14.0 * k;
+    painter.circle_stroke(c, rr, Stroke::new(2.0 * k, rgba(palette.text, 0.18)));
+    let frac = (clock.second() as f32 + clock.nanosecond() as f32 / 1e9) / 60.0;
+    let pts: Vec<Pos2> = (0..=48)
+        .map(|i| c + Vec2::angled(-std::f32::consts::FRAC_PI_2 + frac * std::f32::consts::TAU * i as f32 / 48.0) * rr)
+        .collect();
+    painter.add(Shape::line(pts, Stroke::new(2.5 * k, color(palette.accent))));
+    text(
+        painter,
+        rect.left_bottom() + Vec2::new(0.0, -4.0 * k),
         Align2::LEFT_BOTTOM,
-        format!("{}  ·  {}", japanese_date(clock.date_naive()), clock.year()),
-        prop(17.0 * k),
-        color(palette.dim),
+        &japanese_date(clock.date_naive()),
+        prop(24.0 * k),
+        rgba(palette.text, 0.92),
     );
 }
 
-fn glyph(painter: &egui::Painter, c: Pos2, s: f32, mood: Option<Mood>, palette: &Palette, now: f64) {
-    let stroke = Stroke::new(1.5, color(palette.accent));
-    let cloud = |at: Pos2| {
-        painter.circle_stroke(at + Vec2::new(-s * 0.35, s * 0.1), s * 0.38, stroke);
-        painter.circle_stroke(at + Vec2::new(s * 0.2, -s * 0.05), s * 0.5, stroke);
+/// Animated weather icon: sun or moon, cloud, rain, snow.
+fn icon(painter: &egui::Painter, c: Pos2, s: f32, mood: Option<Mood>, night: bool, palette: &Palette, now: f64) {
+    let t = now as f32;
+    let sun = |at: Pos2, r: f32| {
+        if night {
+            glow(painter, at, 0.0, r * 2.4, rgba([200, 210, 255], 0.25));
+            painter.circle_filled(at, r, rgba([244, 240, 220], 1.0));
+            painter.circle_filled(at + Vec2::new(r * 0.45, -r * 0.3), r * 0.85, rgba(palette.panel, 0.92));
+        } else {
+            glow(painter, at, r * 0.6, r * 2.8, rgba([255, 214, 120], 0.45));
+            for i in 0..10 {
+                let a = i as f32 / 10.0 * std::f32::consts::TAU + t * 0.25;
+                let len = r * (0.45 + 0.12 * (t * 2.0 + i as f32).sin());
+                let d = Vec2::angled(a);
+                painter.line_segment([at + d * r * 1.35, at + d * (r * 1.35 + len)], Stroke::new(r * 0.16, rgba([255, 220, 120], 0.95)));
+            }
+            painter.circle_filled(at, r, rgba([255, 210, 90], 1.0));
+        }
+    };
+    let cloud = |at: Pos2, r: f32, a: f32| {
+        let drift = Vec2::new((t * 0.6).sin() * r * 0.08, 0.0);
+        let fill = rgba([248, 250, 255], a);
+        for (dx, dy, rr) in [(-0.55, 0.15, 0.48), (0.0, -0.1, 0.62), (0.55, 0.12, 0.5), (0.0, 0.25, 0.55)] {
+            painter.circle_filled(at + drift + Vec2::new(dx * r, dy * r), rr * r, fill);
+        }
     };
     match mood {
-        Some(Mood::Clear) | None => {
-            painter.circle_stroke(c, s * 0.42, stroke);
-            for i in 0..8 {
-                let a = i as f32 / 8.0 * std::f32::consts::TAU + now as f32 * 0.3;
-                let d = Vec2::angled(a);
-                painter.line_segment([c + d * s * 0.62, c + d * s * 0.85], stroke);
-            }
+        Some(Mood::Clear) | None => sun(c, s * 0.42),
+        Some(Mood::Cloudy) => {
+            sun(c + Vec2::new(s * 0.22, -s * 0.2), s * 0.3);
+            cloud(c + Vec2::new(-s * 0.05, s * 0.08), s * 0.55, 0.96);
         }
-        Some(Mood::Cloudy) => cloud(c),
-        Some(Mood::Rain) | Some(Mood::Snow) => {
-            cloud(c + Vec2::new(0.0, -s * 0.25));
-            for i in 0..3 {
-                let x = c.x + (i as f32 - 1.0) * s * 0.4;
-                let t = ((now * 1.4 + i as f64 * 0.33) % 1.0) as f32;
-                let y = c.y + s * 0.35 + t * s * 0.55;
-                if mood == Some(Mood::Snow) {
-                    painter.circle_filled(Pos2::new(x, y), 1.6, alpha(palette.accent, 1.0 - t));
+        Some(m) => {
+            cloud(c + Vec2::new(0.0, -s * 0.12), s * 0.55, 0.96);
+            for i in 0..4 {
+                let x = c.x + (i as f32 - 1.5) * s * 0.26;
+                let ph = (t * 1.3 + i as f32 * 0.27) % 1.0;
+                let y = c.y + s * 0.3 + ph * s * 0.45;
+                if m == Mood::Snow {
+                    painter.circle_filled(Pos2::new(x, y), s * 0.06, rgba([255, 255, 255], 1.0 - ph));
                 } else {
                     painter.line_segment(
-                        [Pos2::new(x, y), Pos2::new(x - 2.0, y + s * 0.18)],
-                        Stroke::new(1.5, alpha(palette.accent, 1.0 - t)),
+                        [Pos2::new(x, y), Pos2::new(x - s * 0.05, y + s * 0.16)],
+                        Stroke::new(s * 0.06, rgba([150, 200, 255], 1.0 - ph)),
                     );
                 }
             }
@@ -285,43 +225,31 @@ fn glyph(painter: &egui::Painter, c: Pos2, s: f32, mood: Option<Mood>, palette: 
     }
 }
 
-fn paint_weather(painter: &egui::Painter, rect: Rect, palette: &Palette, w: Option<&atlas::Weather>, now: f64, k: f32) {
-    painter.line_segment(
-        [rect.left_top(), rect.right_top()],
-        Stroke::new(1.0, alpha(palette.border, 0.35)),
-    );
-    let Some(w) = w else {
-        painter.text(
-            rect.left_center(),
-            Align2::LEFT_CENTER,
-            "WEATHER  ·  NO FEED",
-            mono(12.0 * k),
-            color(palette.dim),
-        );
+fn paint_weather(painter: &egui::Painter, rect: Rect, palette: &Palette, info: &StripInfo<'_>, now: f64, k: f32) {
+    let Some(w) = info.weather else {
+        text(painter, rect.left_center(), Align2::LEFT_CENTER, "天気を取得しています", prop(18.0 * k), rgba(palette.dim, 0.9));
         return;
     };
-    let mood = Mood::parse(&w.mood);
-    glyph(painter, rect.left_center() + Vec2::new(14.0 * k, 2.0 * k), 22.0 * k, mood, palette, now);
-    painter.text(
-        rect.left_center() + Vec2::new(40.0 * k, 0.0),
-        Align2::LEFT_CENTER,
-        w.label.as_str(),
-        prop(17.0 * k),
-        color(palette.text),
-    );
-    let temps = match (w.max, w.min) {
-        (Some(hi), Some(lo)) => format!("{hi}° / {lo}°"),
-        (Some(hi), None) => format!("{hi}°"),
-        (None, Some(lo)) => format!("— / {lo}°"),
-        (None, None) => String::new(),
-    };
-    painter.text(rect.right_center(), Align2::RIGHT_CENTER, temps, mono(15.0 * k), color(palette.dim));
+    let night = info.sun_elevation < -3.0;
+    icon(painter, rect.left_center() + Vec2::new(30.0 * k, 0.0), 60.0 * k, Mood::parse(&w.mood), night, palette, now);
+    text(painter, rect.left_center() + Vec2::new(76.0 * k, 0.0), Align2::LEFT_CENTER, &w.label, prop(24.0 * k), color(palette.text));
+    let right = rect.right_center();
+    if let Some(lo) = w.min {
+        text(painter, right, Align2::RIGHT_CENTER, &format!("{lo}°"), prop(22.0 * k), rgba(palette.dim, 0.95));
+    }
+    if let Some(hi) = w.max {
+        let shift = if w.min.is_some() { 58.0 * k } else { 0.0 };
+        text(painter, right - Vec2::new(shift, 2.0 * k), Align2::RIGHT_CENTER, &format!("{hi}°"), clock_font(44.0 * k), color(palette.text));
+    }
 }
 
-/// Map card: two layers crossfading with a slight zoom, then shared chrome on top.
+/// Map card: two layers crossfading with a slight zoom, then a title and dots.
 fn paint_card(painter: &egui::Painter, rect: Rect, palette: &Palette, now: f64, k: f32, card: CardState<'_>) {
-    painter.rect_filled(rect, 4, color(palette.bg));
-    let clip = painter.with_clip_rect(rect);
+    let radius = (16.0 * k) as u8;
+    // A deep window into space behind whatever is shown.
+    painter.rect_filled(rect, radius, rgba(mix(palette.panel, [0, 0, 0], 0.4), 0.85));
+    let clip = painter.with_clip_rect(rect.shrink(1.0));
+    art::gradient(&clip, rect, mix(palette.sky_top, palette.panel, 0.45), mix(palette.sky_bottom, palette.panel, 0.35), 0.95);
     let elapsed = card.frame.map_or(now, |f| f.elapsed);
     let blend = card.frame.map_or(1.0, |f| f.blend);
     if let Some(previous) = &card.previous
@@ -329,65 +257,27 @@ fn paint_card(painter: &egui::Painter, rect: Rect, palette: &Palette, now: f64, 
     {
         paint_layer(&clip, rect, palette, now, k, previous, 1.0 - blend, 1.0, elapsed + strip::DWELL_SECONDS);
     }
-    let zoom = 1.04 - 0.04 * ease(blend);
+    let zoom = 1.06 - 0.06 * ease(blend);
     paint_layer(&clip, rect, palette, now, k, &card.current, blend.max(0.001), zoom, elapsed);
-    // Scanline over everything, like glass in front of the table.
-    let sweep = ((now / 4.0) % 1.0) as f32;
-    let sy = rect.top() + sweep * rect.height();
-    for i in 0..16 {
-        let a = 0.35 * (1.0 - i as f32 / 16.0).powi(2);
-        let y = sy - i as f32 * 2.0;
-        clip.line_segment(
-            [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
-            Stroke::new(if i == 0 { 1.5 } else { 2.0 }, alpha(palette.accent, a)),
-        );
-    }
-    painter.rect_stroke(rect, 4, Stroke::new(1.0, alpha(palette.border, 0.6)), StrokeKind::Inside);
-    brackets(painter, rect.expand(4.0), 14.0 * k, Stroke::new(1.5, color(palette.accent)));
-    // Title chip.
-    let (title, code) = card
-        .frame
-        .map_or(("地図を準備中", "ACQUIRING"), |f| (f.view.title(), f.view.code()));
-    let chip = Rect::from_min_size(rect.left_top() + Vec2::new(8.0, 8.0) * k, Vec2::new(rect.width() * 0.56, 24.0 * k));
-    painter.rect_filled(chip, 3, alpha(palette.bg, 0.78));
-    painter.rect_filled(
-        Rect::from_min_size(chip.min, Vec2::new(3.0 * k, chip.height())),
-        0,
-        color(palette.accent),
-    );
-    painter.text(chip.left_center() + Vec2::new(10.0 * k, 0.0), Align2::LEFT_CENTER, title, prop(14.0 * k), color(palette.text));
-    painter.text(
-        rect.right_top() + Vec2::new(-10.0 * k, 12.0 * k),
-        Align2::RIGHT_TOP,
-        code,
-        mono(10.5 * k),
-        alpha(palette.accent, 0.9),
-    );
-    // Progress through the ready views.
+    painter.rect_stroke(rect, radius, Stroke::new(1.0, rgba([255, 255, 255], 0.18)), StrokeKind::Inside);
+    let title = card.frame.map_or("地図を準備しています", |f| f.view.title());
+    pill(painter, rect.left_top() + Vec2::new(14.0, 14.0) * k, title, 16.0 * k, palette, 1.0);
     if let Some(f) = card.frame {
-        let n = card.ready.len().max(1);
-        let seg_gap = 4.0 * k;
-        let total = rect.width() * 0.4;
-        let seg_w = (total - seg_gap * (n as f32 - 1.0)) / n as f32;
-        let y = rect.bottom() + 9.0 * k;
-        let x0 = rect.center().x - total / 2.0;
+        let n = card.ready.len();
+        let y = rect.bottom() + 12.0 * k;
+        let gap = 14.0 * k;
+        let x0 = rect.center().x - gap * (n as f32 - 1.0) / 2.0;
         for (i, v) in card.ready.iter().enumerate() {
-            let x = x0 + i as f32 * (seg_w + seg_gap);
-            let back = Rect::from_min_size(Pos2::new(x, y), Vec2::new(seg_w, 2.5 * k));
-            painter.rect_filled(back, 1, alpha(palette.border, 0.5));
+            let at = Pos2::new(x0 + i as f32 * gap, y);
             if *v == f.view {
                 let p = (f.elapsed / f.dwell).clamp(0.0, 1.0) as f32;
-                painter.rect_filled(
-                    Rect::from_min_size(back.min, Vec2::new(seg_w * p, back.height())),
-                    1,
-                    color(palette.accent),
-                );
+                painter.circle_filled(at, 4.0 * k, rgba(palette.text, 0.35));
+                painter.circle_filled(at, 4.0 * k * (0.4 + 0.6 * p), color(palette.text));
+            } else {
+                painter.circle_filled(at, 3.0 * k, rgba(palette.text, 0.35));
             }
         }
     }
-}
-fn ease(t: f32) -> f32 {
-    1.0 - (1.0 - t.clamp(0.0, 1.0)).powi(3)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -402,58 +292,36 @@ fn paint_layer(
     zoom: f32,
     elapsed: f64,
 ) {
-    let tint = |rgb: Rgb, a: f32| {
-        // Neutral grey basemaps pick up the palette: lift toward the accent.
-        let m = |c: u8, t: u8| ((c as f32 * 0.55 + t as f32 * 0.45) * a) as u8;
-        Color32::from_rgba_premultiplied(
-            m(255, rgb[0]),
-            m(255, rgb[1]),
-            m(255, rgb[2]),
-            (a * 255.0) as u8,
-        )
+    // Basemaps are neutral grey; they take on the colour of the sky.
+    let tint = {
+        let c = mix(palette.glow, palette.accent, 0.4);
+        // Slightly see-through so the sky behind lifts the dark land.
+        let a = 0.82 * opacity;
+        let m = |v: u8| ((v as f32 * 0.6 + 255.0 * 0.4) * a) as u8;
+        Color32::from_rgba_premultiplied(m(c[0]), m(c[1]), m(c[2]), (a * 255.0) as u8)
     };
     match layer {
         MapCard::Preparing => {
             let c = rect.center();
-            let radius = rect.height() * 0.32;
-            for i in 1..=3 {
-                painter.circle_stroke(c, radius * i as f32 / 3.0, Stroke::new(1.0, alpha(palette.border, 0.5 * opacity)));
-            }
-            let a = now as f32 * 1.6;
-            for i in 0..28 {
-                let aa = a - i as f32 * 0.035;
-                painter.line_segment(
-                    [c, c + Vec2::angled(aa) * radius],
-                    Stroke::new(2.0, alpha(palette.accent, 0.5 * (1.0 - i as f32 / 28.0) * opacity)),
-                );
-            }
-            let dots = ((now * 2.0) as usize) % 4;
-            painter.text(
-                c + Vec2::new(0.0, radius + 16.0 * k),
-                Align2::CENTER_TOP,
-                format!("ACQUIRING SIGNAL{}", ".".repeat(dots)),
-                mono(11.0 * k),
-                alpha(palette.dim, opacity),
-            );
+            let pulse = 0.5 + 0.5 * (now as f32 * 1.5).sin();
+            glow(painter, c, 0.0, rect.width() * (0.25 + 0.05 * pulse), rgba(palette.glow, 0.35 * opacity));
+            painter.circle_filled(c, 6.0 * k, rgba(palette.text, opacity));
         }
         MapCard::Map(m) => {
             let frame = strip::radar_frame(elapsed, m.radar.len(), m.now_index);
             let radar = frame.map(|f| (&m.radar[f.index], &m.radar[f.next], f.blend));
-            let table = Table { base: m.base, radar, focus: m.office, tint: tint(palette.accent, opacity) };
-            let top = tilted_map(painter, rect, palette, now, k, &table, opacity, zoom, elapsed);
+            let table = Table { base: m.base, radar, focus: m.office, tint };
+            tilted_map(painter, rect, palette, now, k, &table, opacity, zoom, elapsed);
             if let Some(f) = frame {
-                radar_timeline(painter, rect, palette, k, m, f, opacity);
+                radar_progress(painter, rect, palette, k, m, f, opacity);
             } else {
-                painter.text(rect.center_bottom() - Vec2::new(0.0, 14.0 * k), Align2::CENTER_BOTTOM, "雨雲データなし", prop(13.0 * k), alpha(palette.dim, opacity));
-            }
-            if let Some(top) = top {
-                tag(painter, top, palette, k, opacity, "OFFICE", m.office_coords);
+                pill(painter, rect.left_bottom() + Vec2::new(14.0, -42.0) * k, "雨雲データなし", 13.0 * k, palette, opacity);
             }
         }
         MapCard::Place(p) => {
-            let table = Table { base: p.map, radar: None, focus: [0.5, 0.5], tint: tint(palette.accent, opacity) };
+            let table = Table { base: p.map, radar: None, focus: [0.5, 0.5], tint };
             if let Some(top) = tilted_map(painter, rect, palette, now, k, &table, opacity, zoom, elapsed) {
-                tag(painter, top, palette, k, opacity, p.place, p.coords);
+                pill(painter, top + Vec2::new(-30.0 * k, -34.0 * k), p.place, 16.0 * k, palette, opacity);
             }
         }
         MapCard::Globe(g) => paint_globe(painter, rect, palette, now, k, g, opacity, zoom),
@@ -467,8 +335,8 @@ struct Table<'a> {
     focus: [f32; 2],
     tint: Color32,
 }
-/// The map as a tilted, slowly orbiting tactical table with a light beam rising
-/// from the point of interest. Returns the screen position of the beam top.
+/// The map as a tilted, slowly orbiting plane with a column of light rising
+/// from the point of interest. Returns the screen position of the light's top.
 #[allow(clippy::too_many_arguments)]
 fn tilted_map(
     painter: &egui::Painter,
@@ -483,428 +351,261 @@ fn tilted_map(
 ) -> Option<Pos2> {
     let w = rect.width() * 1.9 * zoom;
     let h = w * 0.75;
-    let focus = v3(rect.center().x, rect.center().y + rect.height() * 0.08, 0.0);
+    let focus = v3(rect.center().x, rect.center().y + rect.height() * 0.1, 0.0);
     let flat = space::rect_corners(focus.x - t.focus[0] * w, focus.y - t.focus[1] * h, w, h);
-    // Settle from flat to tilted when the view arrives, then orbit.
-    let arrive = space::ease_out((elapsed / 1.6) as f32);
-    let yaw = 0.42 * (now as f32 * 0.11).sin() + 0.25 * (1.0 - arrive);
-    let pitch = 0.18 + 0.72 * arrive + 0.05 * (now as f32 * 0.23).sin();
+    // Settle from flat to tilted when the view arrives, then orbit slowly.
+    let arrive = ease((elapsed / 1.8) as f32);
+    let yaw = 0.45 * (now as f32 * 0.09).sin() + 0.3 * (1.0 - arrive);
+    let pitch = 0.15 + 0.75 * arrive + 0.05 * (now as f32 * 0.21).sin();
     let corners = flat.map(|p| p.turn(focus, yaw, pitch));
     let cam = Camera::new([focus.x, focus.y], rect.width() * 1.25);
-    let on = |u: f32, v: f32, lift: f32| {
-        let flat_p = space::on_quad(&flat, u, v).add(v3(0.0, 0.0, -lift));
-        flat_p.turn(focus, yaw, pitch)
-    };
-    depth::textured(painter, &cam, &corners, t.base.id(), [[0.0, 0.0], [1.0, 1.0]], t.tint, 16);
+    let on = |u: f32, v: f32, lift: f32| space::on_quad(&flat, u, v).add(v3(0.0, 0.0, -lift)).turn(focus, yaw, pitch);
+    let full = [[0.0, 0.0], [1.0, 1.0]];
+    depth::textured(painter, &cam, &corners, t.base.id(), full, t.tint, 16);
     if let Some((a, b, blend)) = t.radar {
-        let full = [[0.0, 0.0], [1.0, 1.0]];
         depth::textured(painter, &cam, &corners, a.id(), full, Color32::from_white_alpha((opacity * (1.0 - blend) * 255.0) as u8), 16);
         if blend > 0.0 {
             depth::textured(painter, &cam, &corners, b.id(), full, Color32::from_white_alpha((opacity * blend * 255.0) as u8), 16);
         }
     }
-    // Table grid and a scan line sweeping across it.
-    let grid = Stroke::new(1.0, alpha(palette.accent, 0.13 * opacity));
-    for i in 0..=12 {
-        let f = i as f32 / 12.0;
-        depth::segment(painter, &cam, on(f, 0.0, 0.0), on(f, 1.0, 0.0), grid);
-        depth::segment(painter, &cam, on(0.0, f, 0.0), on(1.0, f, 0.0), grid);
-    }
-    let sv = ((now / 5.0) % 1.0) as f32;
-    for i in 0..10 {
-        let v = sv - i as f32 * 0.006;
-        if v > 0.0 {
-            let a = 0.6 * (1.0 - i as f32 / 10.0).powi(2) * opacity;
-            depth::segment(painter, &cam, on(0.0, v, 0.0), on(1.0, v, 0.0), Stroke::new(2.0, alpha(palette.accent, a)));
-        }
-    }
-    // Rings expanding on the table around the focus.
+    // Light ripples spreading over the map.
     let (fu, fv) = (t.focus[0], t.focus[1]);
     for ring in 0..3 {
-        let ph = ((now * 0.55 + ring as f64 / 3.0) % 1.0) as f32;
-        let radius = 0.01 + ph * 0.09;
-        let pts: Vec<Pos2> = (0..=48)
+        let ph = ((now * 0.45 + ring as f64 / 3.0) % 1.0) as f32;
+        let radius = 0.01 + ph * 0.11;
+        let pts: Vec<Pos2> = (0..=56)
             .filter_map(|i| {
-                let a = i as f32 / 48.0 * std::f32::consts::TAU;
+                let a = i as f32 / 56.0 * std::f32::consts::TAU;
                 depth::project(&cam, on(fu + radius * a.cos(), fv + radius * a.sin() * 4.0 / 3.0, 0.0))
             })
             .collect();
-        painter.add(Shape::line(pts, Stroke::new(1.5, alpha(palette.accent, (1.0 - ph) * 0.9 * opacity))));
+        painter.add(Shape::line(pts, Stroke::new(2.0 * k, rgba(palette.glow, (1.0 - ph) * 0.8 * opacity))));
     }
-    // The beam: a column of light rising off the table.
-    let height = rect.height() * (0.45 + 0.05 * (now as f32 * 1.7).sin());
-    let steps = 14;
-    for i in 0..steps {
-        let (h0, h1) = (height * i as f32 / steps as f32, height * (i + 1) as f32 / steps as f32);
-        let a = opacity * (1.0 - i as f32 / steps as f32);
-        depth::segment(painter, &cam, on(fu, fv, h0), on(fu, fv, h1), Stroke::new(6.0 * k, alpha(palette.accent, 0.18 * a)));
-        depth::segment(painter, &cam, on(fu, fv, h0), on(fu, fv, h1), Stroke::new(1.6, alpha(palette.text, 0.85 * a)));
+    // The column of light.
+    let height = rect.height() * (0.42 + 0.04 * (now as f32 * 1.3).sin());
+    let base = depth::project(&cam, on(fu, fv, 0.0));
+    let top = depth::project(&cam, on(fu, fv, height));
+    if let (Some(base), Some(top)) = (base, top) {
+        glow(painter, base, 0.0, 34.0 * k, rgba(palette.glow, 0.55 * opacity));
+        let steps = 16;
+        for i in 0..steps {
+            let (a, b) = (i as f32 / steps as f32, (i + 1) as f32 / steps as f32);
+            let fade = opacity * (1.0 - a).powf(1.4);
+            let (p, q) = (base.lerp(top, a), base.lerp(top, b));
+            painter.line_segment([p, q], Stroke::new(14.0 * k, rgba(palette.glow, 0.10 * fade)));
+            painter.line_segment([p, q], Stroke::new(5.0 * k, rgba(palette.glow, 0.25 * fade)));
+            painter.line_segment([p, q], Stroke::new(1.6 * k, rgba([255, 255, 255], 0.95 * fade)));
+        }
+        painter.circle_filled(base, 4.5 * k, rgba([255, 255, 255], opacity));
     }
-    if let Some(base) = depth::project(&cam, on(fu, fv, 0.0)) {
-        painter.circle_filled(base, 4.0 * k, alpha(palette.accent, opacity));
-    }
-    // Distance fog toward the far edge so the table fades into the dark.
-    for i in 0..10 {
+    // Soft distance haze where the map recedes.
+    let haze = mix(palette.panel, [0, 0, 0], 0.45);
+    for i in 0..12 {
         let y = rect.top() + rect.height() * 0.035 * i as f32;
         let band = Rect::from_min_size(Pos2::new(rect.left(), y), Vec2::new(rect.width(), rect.height() * 0.035 + 1.0));
-        painter.rect_filled(band, 0, alpha(palette.bg, 0.85 * (1.0 - i as f32 / 10.0)));
+        painter.rect_filled(band, 0, rgba(haze, 0.9 * (1.0 - i as f32 / 12.0).powf(1.5)));
     }
-    depth::project(&cam, on(fu, fv, height))
-}
-/// Label hanging off a beam top or marker.
-fn tag(painter: &egui::Painter, at: Pos2, palette: &Palette, k: f32, opacity: f32, name: &str, coords_: (f64, f64)) {
-    let box_ = at + Vec2::new(10.0, -6.0) * k;
-    painter.line_segment([at, box_], Stroke::new(1.0, alpha(palette.accent, 0.7 * opacity)));
-    painter.text(box_, Align2::LEFT_BOTTOM, name, prop(13.0 * k), alpha(palette.text, opacity));
-    painter.text(box_ + Vec2::new(0.0, 2.0 * k), Align2::LEFT_TOP, coords(coords_.0, coords_.1), mono(10.0 * k), alpha(palette.dim, opacity));
+    top
 }
 
-#[allow(clippy::too_many_arguments)]
-fn marker(painter: &egui::Painter, rect: Rect, at: Pos2, palette: &Palette, now: f64, k: f32, opacity: f32, name: &str, coords_: (f64, f64)) {
-    let cross = Stroke::new(1.0, alpha(palette.accent, 0.28 * opacity));
-    let gap = 16.0 * k;
-    painter.line_segment([Pos2::new(rect.left(), at.y), Pos2::new(at.x - gap, at.y)], cross);
-    painter.line_segment([Pos2::new(at.x + gap, at.y), Pos2::new(rect.right(), at.y)], cross);
-    painter.line_segment([Pos2::new(at.x, rect.top()), Pos2::new(at.x, at.y - gap)], cross);
-    painter.line_segment([Pos2::new(at.x, at.y + gap), Pos2::new(at.x, rect.bottom())], cross);
-    for i in 0..3 {
-        let p = ((now * 0.7 + i as f64 / 3.0) % 1.0) as f32;
-        painter.circle_stroke(at, 4.0 * k + p * 30.0 * k, Stroke::new(1.5, alpha(palette.accent, (1.0 - p) * 0.9 * opacity)));
-    }
-    painter.circle_filled(at, 3.5 * k, alpha(palette.accent, opacity));
-    let box_ = Rect::from_min_size(at + Vec2::new(12.0, -30.0) * k, Vec2::new(4.0, 4.0));
-    painter.line_segment([at + Vec2::new(4.0, -4.0) * k, box_.min + Vec2::new(0.0, 8.0 * k)], Stroke::new(1.0, alpha(palette.accent, 0.7 * opacity)));
-    painter.text(box_.min, Align2::LEFT_TOP, name, prop(13.0 * k), alpha(palette.text, opacity));
-    painter.text(
-        box_.min + Vec2::new(0.0, 16.0 * k),
-        Align2::LEFT_TOP,
-        coords(coords_.0, coords_.1),
-        mono(10.0 * k),
-        alpha(palette.dim, opacity),
-    );
-}
-
-fn radar_timeline(painter: &egui::Painter, rect: Rect, palette: &Palette, k: f32, m: &MapLayer<'_>, f: strip::RadarFrame, opacity: f32) {
-    let n = m.radar.len();
-    let y = rect.bottom() - 14.0 * k;
-    let x0 = rect.left() + 12.0 * k;
-    let w = rect.width() * 0.5;
-    let step = w / (n.max(2) - 1) as f32;
+fn radar_progress(painter: &egui::Painter, rect: Rect, palette: &Palette, k: f32, m: &MapLayer<'_>, f: strip::RadarFrame, opacity: f32) {
+    let n = m.radar.len().max(2);
     let shown = if f.blend > 0.5 { f.next } else { f.index };
-    for i in 0..n {
-        let x = x0 + i as f32 * step;
-        let h = if i == m.now_index { 10.0 } else { 5.0 } * k;
-        let c = if i == shown {
-            color(palette.accent)
-        } else if i > m.now_index {
-            alpha(palette.accent, 0.35 * opacity)
-        } else {
-            alpha(palette.text, 0.45 * opacity)
-        };
-        painter.line_segment([Pos2::new(x, y), Pos2::new(x, y - h)], Stroke::new(if i == shown { 2.5 } else { 1.0 }, c));
-    }
-    let time = m.frames.get(shown).and_then(|fr| local_hm(&fr.at)).unwrap_or_default();
-    painter.text(
-        Pos2::new(x0 + w + 10.0 * k, y),
-        Align2::LEFT_BOTTOM,
-        format!("{time}  {}", frame_tag(shown, m.now_index)),
-        mono(10.5 * k),
-        alpha(palette.text, opacity),
+    let bar = Rect::from_min_size(
+        rect.left_bottom() + Vec2::new(16.0 * k, -22.0 * k),
+        Vec2::new(rect.width() - 32.0 * k, 3.0 * k),
     );
+    painter.rect_filled(bar, 2, rgba(palette.text, 0.22 * opacity));
+    let p = (f.index as f32 + f.blend) / (n - 1) as f32;
+    painter.rect_filled(
+        Rect::from_min_size(bar.min, Vec2::new(bar.width() * p.min(1.0), bar.height())),
+        2,
+        rgba(palette.text, 0.9 * opacity),
+    );
+    let nx = bar.left() + bar.width() * m.now_index as f32 / (n - 1) as f32;
+    painter.circle_filled(Pos2::new(nx, bar.center().y), 4.0 * k, rgba(palette.accent, opacity));
+    let time = m.frames.get(shown).and_then(|fr| local_hm(&fr.at)).unwrap_or_default();
+    let label = format!("{time}  {}", frame_label(shown, m.now_index));
+    text(painter, bar.left_top() - Vec2::new(0.0, 8.0 * k), Align2::LEFT_BOTTOM, &label, prop(15.0 * k), rgba(palette.text, opacity));
 }
 
 #[allow(clippy::too_many_arguments)]
 fn paint_globe(painter: &egui::Painter, rect: Rect, palette: &Palette, now: f64, k: f32, g: &GlobeLayer<'_>, opacity: f32, zoom: f32) {
-    let c = rect.center() + Vec2::new(0.0, 4.0 * k);
-    let radius = rect.height() * 0.40 * zoom;
-    // Stars.
-    for i in 0..70u32 {
-        let p = rect.min + rect.size() * Vec2::new(hash(i * 2), hash(i * 2 + 1));
-        if (p - c).length() < radius + 6.0 {
+    let c = rect.center() + Vec2::new(0.0, 6.0 * k);
+    let radius = rect.height().min(rect.width()) * 0.36 * zoom;
+    for i in 0..60u32 {
+        let h = |j: u32| {
+            let mut x = (i * 7 + j).wrapping_mul(0x9E37_79B9) ^ 0x5bd1_e995;
+            x ^= x >> 15;
+            ((x.wrapping_mul(0x2C1B_3C6D) >> 8) & 0xFFFF) as f32 / 65535.0
+        };
+        let p = rect.min + rect.size() * Vec2::new(h(1), h(2));
+        if (p - c).length() < radius * 1.2 {
             continue;
         }
-        let tw = 0.35 + 0.65 * (0.5 + 0.5 * (now as f32 * (0.6 + hash(i + 999)) + i as f32).sin());
-        painter.circle_filled(p, 0.6 + hash(i + 77) * 0.9, alpha(palette.text, 0.5 * tw * opacity));
+        let tw = 0.4 + 0.6 * (0.5 + 0.5 * (now as f32 * (0.5 + h(3)) + i as f32).sin());
+        painter.circle_filled(p, 0.6 + h(4), rgba([255, 255, 255], 0.6 * tw * opacity));
     }
-    // Atmosphere.
-    for i in 0..8 {
-        let a = 0.22 * (1.0 - i as f32 / 8.0) * opacity;
-        painter.circle_stroke(c, radius + 1.0 + i as f32 * 1.6, Stroke::new(1.6, alpha(palette.accent, a)));
-    }
+    // Atmosphere: a wide soft halo and a bright rim.
+    glow(painter, c, radius * 0.98, radius * 1.32, rgba(palette.glow, 0.45 * opacity));
+    glow(painter, c, radius * 0.98, radius * 1.08, rgba([170, 210, 255], 0.55 * opacity));
     let m = globe::mesh([c.x, c.y], radius, g.view.0, g.view.1, g.sun.subsolar_lat, g.sun.subsolar_lon, 72, 36);
     let mut day = epaint::Mesh::with_texture(g.day.id());
     let mut night = epaint::Mesh::with_texture(g.night.id());
     for v in &m.vertices {
         let pos = Pos2::new(v.pos[0], v.pos[1]);
         let uv = Pos2::new(v.uv[0], v.uv[1]);
-        let light = (1.0 - 0.88 * v.night) * (0.55 + 0.45 * v.facing.sqrt());
+        let light = (1.0 - 0.9 * v.night) * (0.5 + 0.5 * v.facing.sqrt());
         let l = (light * opacity * 255.0) as u8;
         day.vertices.push(epaint::Vertex { pos, uv, color: Color32::from_rgba_premultiplied(l, l, l, (opacity * 255.0) as u8) });
-        let n = (v.night * opacity * 230.0) as u8;
+        let n = (v.night * opacity * 255.0) as u8;
         night.vertices.push(epaint::Vertex { pos, uv, color: Color32::from_rgba_premultiplied(n, n, n, n) });
     }
     day.indices = m.indices.clone();
     night.indices = m.indices;
     painter.add(Shape::mesh(day));
     painter.add(Shape::mesh(night));
-    // Graticule.
-    let grat = Stroke::new(1.0, alpha(palette.accent, 0.14 * opacity));
-    let to_screen = |p: [f32; 2]| Pos2::new(c.x + p[0] * radius, c.y - p[1] * radius);
-    for lat in [-60.0, -30.0, 0.0, 30.0, 60.0] {
-        for line in globe::graticule_line(g.view.0, g.view.1, lat, false) {
-            painter.add(Shape::line(line.into_iter().map(to_screen).collect(), grat));
+    // One slow orbit with a travelling light, hidden behind the globe.
+    let to_screen = |p: space::V3| Pos2::new(c.x + p.x * radius, c.y + p.y * radius);
+    let at = |theta: f32| v3(theta.cos() * 1.3, 0.0, theta.sin() * 1.3).pitch(0.5).yaw(now as f32 * 0.03);
+    let hidden = |p: space::V3| p.z > 0.0 && p.x * p.x + p.y * p.y < 1.0;
+    for j in 0..140 {
+        let (a, b) = (at(j as f32 / 140.0 * std::f32::consts::TAU), at((j + 1) as f32 / 140.0 * std::f32::consts::TAU));
+        if !hidden(a) && !hidden(b) {
+            let line = if a.z <= 0.0 { 0.45 } else { 0.15 };
+            painter.line_segment([to_screen(a), to_screen(b)], Stroke::new(1.2, rgba([255, 255, 255], line * opacity)));
         }
     }
-    for i in 0..12 {
-        for line in globe::graticule_line(g.view.0, g.view.1, -180.0 + 30.0 * i as f64, true) {
-            painter.add(Shape::line(line.into_iter().map(to_screen).collect(), grat));
-        }
+    let sat = at(now as f32 * 0.4);
+    if !hidden(sat) {
+        glow(painter, to_screen(sat), 0.0, 12.0 * k, rgba(palette.glow, 0.8 * opacity));
+        painter.circle_filled(to_screen(sat), 2.5 * k, rgba([255, 255, 255], opacity));
     }
-    // Orbit ring with ticks, rotating.
-    let ring = radius * 1.16;
-    let spin = now as f32 * 0.12;
-    for i in 0..60 {
-        let a = spin + i as f32 / 60.0 * std::f32::consts::TAU;
-        let len = if i % 5 == 0 { 7.0 } else { 3.0 } * k;
-        let d = Vec2::angled(a);
-        painter.line_segment([c + d * ring, c + d * (ring + len)], Stroke::new(1.0, alpha(palette.border, 0.6 * opacity)));
-    }
-    let arc: Vec<Pos2> = (0..=40)
-        .map(|i| c + Vec2::angled(-spin * 2.0 + i as f32 / 40.0 * 1.2) * (ring - 4.0 * k))
-        .collect();
-    painter.add(Shape::line(arc, Stroke::new(2.0, alpha(palette.accent, 0.8 * opacity))));
-    // Satellite orbits: tilted rings, hidden where the globe covers them.
-    for (i, (incl, speed, rr)) in [(0.45_f32, 0.35_f64, 1.28_f32), (-0.95, -0.24, 1.44), (1.3, 0.5, 1.18)]
-        .into_iter()
-        .enumerate()
-    {
-        let node = now as f32 * 0.04 * (i as f32 + 1.0);
-        let at = |theta: f32| v3(theta.cos() * rr, 0.0, theta.sin() * rr).pitch(incl).yaw(node);
-        let visible = |p: space::V3| p.z <= 0.0 || p.x * p.x + p.y * p.y > 1.0;
-        let n = 120;
-        for j in 0..n {
-            let (a, b) = (at(j as f32 / n as f32 * std::f32::consts::TAU), at((j + 1) as f32 / n as f32 * std::f32::consts::TAU));
-            if !visible(a) || !visible(b) {
-                continue;
-            }
-            let front = if a.z <= 0.0 { 0.5 } else { 0.14 };
-            painter.line_segment(
-                [Pos2::new(c.x + a.x * radius, c.y + a.y * radius), Pos2::new(c.x + b.x * radius, c.y + b.y * radius)],
-                Stroke::new(1.0, alpha(palette.accent, front * opacity)),
-            );
-        }
-        for trail in 0..8 {
-            let theta = (now * speed) as f32 + i as f32 * 2.1 - trail as f32 * 0.035 * speed.signum() as f32;
-            let p = at(theta);
-            if visible(p) {
-                let a = opacity * (1.0 - trail as f32 / 8.0);
-                painter.circle_filled(Pos2::new(c.x + p.x * radius, c.y + p.y * radius), (3.0 - trail as f32 * 0.3) * k, alpha(palette.text, a));
-            }
-        }
-    }
-    // Office and optional far photo place.
-    if let Some(p) = globe::project(g.view.0, g.view.1, g.office.0, g.office.1) {
-        let at = to_screen(p);
-        for i in 0..2 {
-            let ph = ((now * 0.8 + i as f64 * 0.5) % 1.0) as f32;
-            painter.circle_stroke(at, 3.0 + ph * 18.0 * k, Stroke::new(1.2, alpha(palette.accent, (1.0 - ph) * opacity)));
-        }
-        painter.circle_filled(at, 2.5 * k, alpha(palette.accent, opacity));
+    let disc = |lat: f64, lon: f64| globe::project(g.view.0, g.view.1, lat, lon).map(|p| Pos2::new(c.x + p[0] * radius, c.y - p[1] * radius));
+    if let Some(p) = disc(g.office.0, g.office.1) {
+        let ph = ((now * 0.6) % 1.0) as f32;
+        glow(painter, p, 0.0, 18.0 * k, rgba(palette.glow, 0.7 * opacity));
+        painter.circle_stroke(p, 4.0 * k + ph * 22.0 * k, Stroke::new(1.5, rgba([255, 255, 255], (1.0 - ph) * opacity)));
+        painter.circle_filled(p, 3.5 * k, rgba([255, 255, 255], opacity));
     }
     if let Some((lat, lon, name)) = g.marker
-        && let Some(p) = globe::project(g.view.0, g.view.1, lat, lon)
+        && let Some(p) = disc(lat, lon)
     {
-        let at = to_screen(p);
-        marker(painter, rect, at, palette, now, k, opacity, name, (lat, lon));
-    }
-    painter.text(
-        rect.left_bottom() + Vec2::new(12.0, -12.0) * k,
-        Align2::LEFT_BOTTOM,
-        format!("SUBSOLAR {}", coords(g.sun.subsolar_lat, g.sun.subsolar_lon)),
-        mono(10.0 * k),
-        alpha(palette.dim, opacity),
-    );
-}
-
-fn paint_telemetry(painter: &egui::Painter, rect: Rect, palette: &Palette, now: f64, k: f32, t: &Telemetry<'_>) {
-    if rect.height() < 30.0 * k {
-        return;
-    }
-    label(painter, rect.left_top(), "TELEMETRY", palette, k);
-    let up = t.uptime as u64;
-    let rows = [
-        ("POSITION", coords(t.office.0, t.office.1)),
-        ("SUN ELEV", format!("{:+.1}°", t.sun.elevation_deg)),
-        ("PHASE", t.phase.to_ascii_uppercase()),
-        ("MOOD", t.mood.map_or("—", |m| m.name()).to_ascii_uppercase()),
-        ("ATLAS LINK", t.atlas_state.to_ascii_uppercase()),
-        ("SCENE", format!("#{:04} · {} IMG", t.scene_id, t.photos)),
-        ("UPTIME", format!("{:02}:{:02}:{:02}", up / 3600, up / 60 % 60, up % 60)),
-    ];
-    let line = 17.0 * k;
-    let top = rect.top() + 18.0 * k;
-    let fit = (((rect.height() - 18.0 * k - 40.0 * k) / line).floor().max(0.0) as usize).min(rows.len());
-    let col = rect.width() * 0.42;
-    for (i, (key, value)) in rows.iter().take(fit).enumerate() {
-        let y = top + i as f32 * line;
-        painter.text(Pos2::new(rect.left(), y), Align2::LEFT_TOP, *key, mono(11.0 * k), color(palette.dim));
-        // Each row "settles" once per minute: a brief accent flash, staggered.
-        let flash = ((now + i as f64 * 0.37) % 60.0) < 0.4;
-        painter.text(
-            Pos2::new(rect.left() + col, y),
-            Align2::LEFT_TOP,
-            value,
-            mono(11.0 * k),
-            if flash { color(palette.accent) } else { color(palette.text) },
-        );
-    }
-    // Signal trace along the bottom of the block.
-    let h = 26.0 * k;
-    let base = rect.bottom() - 4.0 * k;
-    if rect.height() > h + 24.0 * k {
-        let n = 96;
-        let pts: Vec<Pos2> = (0..n)
-            .map(|i| {
-                let x = i as f32 / (n - 1) as f32;
-                let tt = now as f32 * 1.3 + x * 9.0;
-                let v = 0.5 * (tt.sin() * 0.6 + (tt * 2.7).sin() * 0.25 + (tt * 6.1).sin() * 0.15);
-                Pos2::new(rect.left() + x * rect.width(), base - h * (0.5 + v))
-            })
-            .collect();
-        painter.line_segment(
-            [Pos2::new(rect.left(), base), Pos2::new(rect.right(), base)],
-            Stroke::new(1.0, alpha(palette.border, 0.4)),
-        );
-        painter.add(Shape::line(pts, Stroke::new(1.2, alpha(palette.accent, 0.75))));
+        glow(painter, p, 0.0, 22.0 * k, rgba(palette.accent, 0.8 * opacity));
+        painter.circle_filled(p, 4.0 * k, rgba([255, 255, 255], opacity));
+        pill(painter, p + Vec2::new(10.0, -36.0) * k, name, 16.0 * k, palette, opacity);
     }
 }
 
-fn level_color(level: u8, palette: &Palette) -> Color32 {
+fn level_color(level: u8) -> Rgb {
     match level {
-        0 => alpha(palette.border, 0.55),
-        1 => Color32::from_rgb(110, 190, 255),
-        2 => Color32::from_rgb(40, 110, 255),
-        3 => Color32::from_rgb(250, 235, 40),
-        4 => Color32::from_rgb(255, 160, 30),
-        5 => Color32::from_rgb(255, 60, 40),
-        _ => Color32::from_rgb(200, 30, 140),
+        0 => [255, 255, 255],
+        1 => [140, 205, 255],
+        2 => [70, 140, 255],
+        3 => [255, 230, 90],
+        4 => [255, 170, 60],
+        5 => [255, 90, 70],
+        _ => [230, 70, 170],
     }
 }
 
 fn paint_rain(painter: &egui::Painter, rect: Rect, palette: &Palette, now: f64, k: f32, rain: Option<&atlas::Rain>, since: f64) {
-    painter.line_segment([rect.left_top(), rect.right_top()], Stroke::new(1.0, alpha(palette.border, 0.35)));
-    label(painter, rect.left_top() + Vec2::new(0.0, 6.0 * k), "PRECIPITATION · NEXT 60 MIN", palette, k);
     let Some(rain) = rain else {
-        painter.text(rect.left_top() + Vec2::new(0.0, 26.0 * k), Align2::LEFT_TOP, "雨雲データなし", prop(18.0 * k), color(palette.dim));
+        text(painter, rect.left_top(), Align2::LEFT_TOP, "雨雲データなし", prop(22.0 * k), rgba(palette.dim, 0.9));
         return;
     };
     let expected = rain.expected();
-    painter.text(
-        rect.left_top() + Vec2::new(0.0, 24.0 * k),
+    text(
+        painter,
+        rect.left_top(),
         Align2::LEFT_TOP,
-        rain.summary.as_str(),
-        prop(20.0 * k),
+        &rain.summary,
+        prop(24.0 * k),
         if expected { color(palette.accent) } else { color(palette.text) },
     );
-    let bars = Rect::from_min_max(
-        Pos2::new(rect.left(), rect.bottom() - 34.0 * k),
-        Pos2::new(rect.right(), rect.bottom() - 14.0 * k),
-    );
-    let n = rain.series.len().max(1);
-    let gap = 3.0 * k;
-    let bw = (bars.width() - gap * (n as f32 - 1.0)) / n as f32;
-    for (i, level) in rain.series.iter().enumerate() {
-        let grow = ease((((now - since) - i as f64 * 0.05) / 0.8) as f32);
-        let h = (2.0 * k).max(bars.height() * (*level as f32 / 6.0).sqrt()) * grow;
-        let x = bars.left() + i as f32 * (bw + gap);
-        painter.rect_filled(
-            Rect::from_min_max(Pos2::new(x, bars.bottom() - h), Pos2::new(x + bw, bars.bottom())),
-            1,
-            level_color(*level, palette),
-        );
+    // A smooth area over the next hour; low and calm when it stays dry.
+    let chart = Rect::from_min_max(Pos2::new(rect.left(), rect.top() + 46.0 * k), Pos2::new(rect.right(), rect.bottom() - 22.0 * k));
+    let n = rain.series.len().max(2);
+    let grow = ease(((now - since) / 1.2) as f32);
+    let level_at = |x: f32| {
+        let f = x * (n - 1) as f32;
+        let i = (f.floor() as usize).min(n - 2);
+        let t = f - i as f32;
+        let t = t * t * (3.0 - 2.0 * t);
+        let get = |j: usize| rain.series.get(j).copied().unwrap_or(0) as f32;
+        get(i) * (1.0 - t) + get(i + 1) * t
+    };
+    let samples = 80;
+    let mut mesh = epaint::Mesh::default();
+    let mut top_line = Vec::with_capacity(samples + 1);
+    for s in 0..=samples {
+        let x = s as f32 / samples as f32;
+        let lv = level_at(x);
+        let wave = 0.03 * (now as f32 * 1.4 + x * 9.0).sin();
+        let hgt = ((lv / 6.0).sqrt() * grow + 0.08 + wave).clamp(0.02, 1.0) * chart.height();
+        let px = chart.left() + x * chart.width();
+        let top = Pos2::new(px, chart.bottom() - hgt);
+        let c = level_color(lv.round() as u8);
+        mesh.colored_vertex(top, rgba(c, if lv > 0.05 { 0.75 } else { 0.35 }));
+        mesh.colored_vertex(Pos2::new(px, chart.bottom()), rgba(c, 0.02));
+        top_line.push(top);
     }
-    // A cursor sweeping the hour.
-    let cx = bars.left() + bars.width() * ((now / 8.0) % 1.0) as f32;
-    painter.line_segment(
-        [Pos2::new(cx, bars.top() - 3.0 * k), Pos2::new(cx, bars.bottom())],
-        Stroke::new(1.0, alpha(palette.accent, 0.5)),
-    );
-    for (t, align, x) in [("NOW", Align2::LEFT_TOP, bars.left()), ("+30", Align2::CENTER_TOP, bars.center().x), ("+60", Align2::RIGHT_TOP, bars.right())] {
-        painter.text(Pos2::new(x, bars.bottom() + 3.0 * k), align, t, mono(10.0 * k), color(palette.dim));
+    for s in 0..samples as u32 {
+        let a = 2 * s;
+        mesh.add_triangle(a, a + 1, a + 2);
+        mesh.add_triangle(a + 1, a + 2, a + 3);
+    }
+    painter.add(Shape::mesh(mesh));
+    painter.add(Shape::line(top_line, Stroke::new(2.0 * k, rgba([255, 255, 255], 0.85))));
+    for (label, align, x) in [
+        ("いま", Align2::LEFT_TOP, chart.left()),
+        ("30分後", Align2::CENTER_TOP, chart.center().x),
+        ("60分後", Align2::RIGHT_TOP, chart.right()),
+    ] {
+        painter.text(Pos2::new(x, chart.bottom() + 4.0 * k), align, label, prop(13.0 * k), rgba(palette.dim, 0.9));
     }
 }
 
-/// Small index tag on a collage card (its screen bounding box).
-pub fn card_label(painter: &egui::Painter, card: Rect, palette: &Palette, index: usize, opacity: f32) {
-    painter.text(
-        card.left_top() + Vec2::new(10.0, 8.0),
-        Align2::LEFT_TOP,
-        format!("IMG-{:02}", index + 1),
-        mono(10.0),
-        alpha(palette.text, 0.75 * opacity),
+/// Place chip on a photo print: "京都市 · 2025年8月".
+pub fn place_chip(painter: &egui::Painter, print: Rect, palette: &Palette, place: &atlas::Place, now: f64, opacity: f32) {
+    let label = match place.taken.as_deref().and_then(taken_label) {
+        Some(t) => format!("{} · {}", place.place, t),
+        None => place.place.clone(),
+    };
+    let galley = painter.layout_no_wrap(label, prop(15.0), rgba([255, 255, 255], opacity));
+    let r = Rect::from_min_size(
+        Pos2::new(print.left() + 14.0, print.bottom() - 26.0 - galley.size().y),
+        galley.size() + Vec2::new(40.0, 12.0),
     );
+    painter.rect_filled(r, (r.height() / 2.0) as u8, rgba([10, 14, 28], 0.5 * opacity));
+    let dot = r.left_center() + Vec2::new(16.0, 0.0);
+    let ph = ((now * 0.7) % 1.0) as f32;
+    painter.circle_stroke(dot, 3.0 + ph * 7.0, Stroke::new(1.2, rgba(palette.glow, (1.0 - ph) * opacity)));
+    painter.circle_filled(dot, 3.5, rgba([255, 255, 255], opacity));
+    painter.galley(r.min + Vec2::new(30.0, 6.0), galley, rgba([255, 255, 255], opacity));
 }
-/// A bright vertical scan crossing the collage after a new scene commits.
-pub fn sweep(painter: &egui::Painter, collage: crate::layout::Rect, origin: Pos2, palette: &Palette, progress: f32) {
-    let area = r(collage, origin);
-    let x = area.left() + ease(progress) * area.width();
-    let fade = 1.0 - progress.powi(3);
-    for i in 0..40 {
-        let xx = x - i as f32 * 3.0;
-        if xx < area.left() {
-            break;
-        }
-        let a = 0.22 * (1.0 - i as f32 / 40.0).powi(2) * fade;
-        painter.line_segment([Pos2::new(xx, area.top()), Pos2::new(xx, area.bottom())], Stroke::new(3.0, alpha(palette.accent, a)));
-    }
-    painter.line_segment([Pos2::new(x, area.top()), Pos2::new(x, area.bottom())], Stroke::new(1.5, alpha(palette.accent, 0.9 * fade)));
-    for i in 0..6 {
-        let y = area.top() + area.height() * (i as f32 + 0.5) / 6.0;
-        painter.text(
-            Pos2::new(x + 6.0, y),
-            Align2::LEFT_CENTER,
-            format!("{:03}", ((progress * 997.0) as u32 + i * 131) % 1000),
-            mono(9.0),
-            alpha(palette.accent, 0.7 * fade),
-        );
-    }
-}
-/// "◉ 京都市 · 2025.08" chip on a collage card whose photo has a place.
-pub fn place_chip(painter: &egui::Painter, card: Rect, palette: &Palette, place: &atlas::Place, now: f64, opacity: f32) {
-    let taken = place.taken.as_deref().map(|t| t.replace('-', ".")).unwrap_or_default();
-    let text = if taken.is_empty() { place.place.clone() } else { format!("{} · {}", place.place, taken) };
-    let galley = painter.layout_no_wrap(text, prop(14.0), alpha(palette.text, opacity));
-    let size = galley.size() + Vec2::new(34.0, 12.0);
-    let chip = Rect::from_min_size(Pos2::new(card.left() + 12.0, card.bottom() - 12.0 - size.y), size);
-    painter.rect_filled(chip, 3, alpha(palette.bg, 0.78 * opacity));
-    painter.rect_stroke(chip, 3, Stroke::new(1.0, alpha(palette.accent, 0.6 * opacity)), StrokeKind::Inside);
-    let dot = chip.left_center() + Vec2::new(13.0, 0.0);
-    let p = ((now * 0.8) % 1.0) as f32;
-    painter.circle_stroke(dot, 3.0 + p * 6.0, Stroke::new(1.0, alpha(palette.accent, (1.0 - p) * opacity)));
-    painter.circle_filled(dot, 3.0, alpha(palette.accent, opacity));
-    painter.galley(chip.min + Vec2::new(26.0, 6.0), galley, color(palette.text));
+/// "LIVE" pill for the live tile.
+pub fn live_pill(painter: &egui::Painter, print: Rect, now: f64, opacity: f32) {
+    let r = Rect::from_min_size(print.left_bottom() + Vec2::new(14.0, -40.0), Vec2::new(64.0, 26.0));
+    painter.rect_filled(r, 13, rgba([10, 14, 28], 0.55 * opacity));
+    let pulse = ((now * 2.0).sin() * 0.5 + 0.5) as f32;
+    painter.circle_filled(r.left_center() + Vec2::new(14.0, 0.0), 4.0, rgba([255, 90, 90], (0.6 + 0.4 * pulse) * opacity));
+    painter.text(r.left_center() + Vec2::new(24.0, 0.0), Align2::LEFT_CENTER, "LIVE", prop(13.0), rgba([255, 255, 255], opacity));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn japanese_dates_and_tags() {
+    fn japanese_labels() {
         let d = NaiveDate::from_ymd_opt(2026, 10, 22).unwrap();
         assert_eq!(japanese_date(d), "10月22日 木曜日");
         assert_eq!(japanese_date(NaiveDate::from_ymd_opt(2026, 1, 4).unwrap()), "1月4日 日曜日");
-        assert_eq!(frame_tag(6, 6), "NOW");
-        assert_eq!(frame_tag(3, 6), "OBS -30");
-        assert_eq!(frame_tag(8, 6), "FCST +20");
-        assert_eq!(coords(35.681, 139.767), "35.68N 139.77E");
-        assert_eq!(coords(-33.9, -70.65), "33.90S 70.65W");
-    }
-    #[test]
-    fn hash_is_stable_and_in_range() {
-        for i in 0..1000 {
-            let h = hash(i);
-            assert!((0.0..=1.0).contains(&h));
-            assert_eq!(h, hash(i));
-        }
+        assert_eq!(frame_label(6, 6), "いま");
+        assert_eq!(frame_label(3, 6), "30分前");
+        assert_eq!(frame_label(8, 6), "20分後");
+        assert_eq!(taken_label("2025-08").as_deref(), Some("2025年8月"));
+        assert_eq!(taken_label("2025-13"), None);
+        assert_eq!(taken_label("25-08"), None);
     }
 }

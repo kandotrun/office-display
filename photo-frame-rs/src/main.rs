@@ -5,7 +5,7 @@ use eframe::egui::{
     ViewportCommand,
 };
 use photo_frame_rs::{
-    Timeline, atlas, depth,
+    Timeline, art, atlas, depth,
     space::{self, Camera, V3},
     decode::DecodedPhoto,
     hud::Hud,
@@ -176,6 +176,8 @@ struct GpuPhoto {
     backdrop: Option<TextureHandle>,
     aspect: f32,
     name: String,
+    /// Average colour, used to tint the light in the sky.
+    tone: [u8; 3],
 }
 struct Scene {
     photos: Vec<GpuPhoto>,
@@ -210,10 +212,23 @@ impl Scene {
         }
     }
 }
+/// Mean colour over a sparse sample of pixels.
+fn tone(image: &egui::ColorImage) -> [u8; 3] {
+    let step = (image.pixels.len() / 2048).max(1);
+    let (mut sum, mut n) = ([0u64; 3], 0u64);
+    for p in image.pixels.iter().step_by(step) {
+        sum[0] += p.r() as u64;
+        sum[1] += p.g() as u64;
+        sum[2] += p.b() as u64;
+        n += 1;
+    }
+    sum.map(|v| (v / n.max(1)) as u8)
+}
 fn upload(ctx: &egui::Context, photos: Vec<DecodedPhoto>, layout: Layout, size: [f32; 2]) -> Scene {
     let photos = photos
         .into_iter()
         .map(|photo| GpuPhoto {
+            tone: tone(&photo.image),
             texture: ctx.load_texture("photo-slot", photo.image, TextureOptions::LINEAR),
             backdrop: photo
                 .backdrop
@@ -270,8 +285,36 @@ fn screen_box(cam: &Camera, c: &[V3; 4]) -> Option<egui::Rect> {
     let pts: Option<Vec<Pos2>> = c.iter().map(|p| depth::project(cam, *p)).collect();
     pts.map(|p| egui::Rect::from_points(&p))
 }
-/// Draw a scene in 3D. `skip_index` leaves one photo's card empty so the live
-/// camera can be drawn into it (card background and border are still painted).
+/// White print border around a photo, scaled to its size.
+fn matte(r: egui::Rect) -> f32 {
+    (r.width().min(r.height()) * 0.028).clamp(5.0, 14.0)
+}
+/// A light glancing across a print: a soft diagonal band at `progress` 0..1.
+fn glare(painter: &egui::Painter, cam: &Camera, c: &[V3; 4], progress: f32, alpha: f32) {
+    let centre = -0.35 + 1.7 * progress;
+    let width = 0.22;
+    let rows = 6;
+    let mut mesh = egui::epaint::Mesh::default();
+    for j in 0..=rows {
+        let v = j as f32 / rows as f32;
+        let skew = 0.3 * (v - 0.5);
+        for (du, a) in [(-width, 0.0), (0.0, 0.32), (width, 0.0)] {
+            let u = (centre + skew + du).clamp(0.0, 1.0);
+            let p = depth::project(cam, space::on_quad(c, u, v)).unwrap_or(Pos2::ZERO);
+            mesh.colored_vertex(p, Color32::from_white_alpha((a * alpha * 255.0) as u8));
+        }
+    }
+    for j in 0..rows as u32 {
+        let (a, b) = (3 * j, 3 * (j + 1));
+        for i in 0..2 {
+            mesh.add_triangle(a + i, a + i + 1, b + i);
+            mesh.add_triangle(a + i + 1, b + i, b + i + 1);
+        }
+    }
+    painter.add(egui::Shape::mesh(mesh));
+}
+/// Draw a scene in 3D as floating prints. `skip_index` leaves one card for the
+/// live camera, drawn by the caller with the same pose.
 #[allow(clippy::too_many_arguments)]
 fn paint_scene(
     painter: &egui::Painter,
@@ -283,60 +326,37 @@ fn paint_scene(
     hud: &Hud,
     now: f64,
     pose: impl Fn(usize) -> CardPose,
+    glance: impl Fn(usize) -> Option<f32>,
 ) -> usize {
     let mut draws = 0;
     for (order, p) in scene.layout.placements.iter().enumerate() {
         let pose = pose(order);
-        if pose.alpha <= 0.0 {
+        if pose.alpha <= 0.0 || skip_index == Some(p.index) {
             continue;
         }
         let a = pose.alpha;
         let photo = &scene.photos[p.index];
         let card = rect(p.card, origin);
-        let corners = lift(card, card, pose);
-        depth::shadow(painter, cam, &corners, a);
-        depth::filled(painter, cam, &corners, strip_paint::alpha(palette.surface, a));
-        let border = Stroke::new(1_f32, strip_paint::alpha(palette.border, a * 0.6));
-        if skip_index == Some(p.index) {
-            depth::outline(painter, cam, &corners, border);
-            continue;
-        }
-        if let Some(backdrop) = &photo.backdrop {
-            depth::textured(
-                painter,
-                cam,
-                &lift(card.shrink(2.), card, pose),
-                backdrop.id(),
-                uv_of(cover_uv(backdrop.size_vec2(), card.size())),
-                Color32::from_rgba_unmultiplied(80, 80, 80, (a * 140.) as u8),
-                6,
-            );
-        }
+        let fg = rect(p.foreground, origin);
+        let print = lift(fg.expand(matte(fg)), card, pose);
+        depth::shadow(painter, cam, &print, a * 1.6);
+        depth::filled(painter, cam, &print, Color32::from_rgba_unmultiplied(250, 248, 244, (a * 255.0) as u8));
         let half = 0.5 / pose.zoom.max(1.0);
+        let image = lift(fg, card, pose);
         depth::textured(
             painter,
             cam,
-            &lift(rect(p.foreground, origin), card, pose),
+            &image,
             photo.texture.id(),
             [[0.5 - half, 0.5 - half], [0.5 + half, 0.5 + half]],
             Color32::from_white_alpha((a * 255.0) as u8),
             10,
         );
-        depth::outline(painter, cam, &corners, border);
-        // Brackets close in on the card as it arrives, like a target lock.
-        let lock = 3.0 + 26.0 * (1.0 - space::ease_out(a));
-        depth::brackets(
-            painter,
-            cam,
-            &lift(card.expand(lock), card, pose),
-            0.08,
-            Stroke::new(1.5, strip_paint::alpha(palette.accent, 0.8 * a)),
-        );
-        if let Some(screen) = screen_box(cam, &corners) {
-            strip_paint::card_label(painter, screen, palette, order, a);
-            if let Some(place) = hud.place(&photo.name) {
-                strip_paint::place_chip(painter, screen, palette, place, now, a);
-            }
+        if let Some(g) = glance(order) {
+            glare(painter, cam, &image, g, a);
+        }
+        if let (Some(place), Some(screen)) = (hud.place(&photo.name), screen_box(cam, &image)) {
+            strip_paint::place_chip(painter, screen, palette, place, now, a);
         }
         draws += 1;
     }
@@ -391,27 +411,6 @@ fn live_tile_placement<'a>(scene: &'a Scene, aspect: f32) -> Option<&'a layout::
         .max_by(|a, b| score(a).total_cmp(&score(b)))
 }
 
-fn live_badge(painter: &egui::Painter, card: egui::Rect, now: f64) {
-    let pulse = ((now * 2.0).sin() * 0.5 + 0.5) as f32;
-    let origin = Pos2::new(card.left() + 22.0, card.bottom() - 18.0);
-    painter.rect_filled(
-        egui::Rect::from_min_size(origin - Vec2::new(10.0, 19.0), Vec2::new(62.0, 26.0)),
-        13,
-        Color32::from_rgba_unmultiplied(10, 14, 19, 190),
-    );
-    painter.circle_filled(
-        origin + Vec2::new(2.0, -6.0),
-        3.5,
-        Color32::from_rgba_unmultiplied(232, 74, 74, (150.0 + 105.0 * pulse) as u8),
-    );
-    painter.text(
-        origin + Vec2::new(12.0, 0.0),
-        Align2::LEFT_BOTTOM,
-        "LIVE",
-        FontId::proportional(12.),
-        Color32::from_rgb(236, 242, 247),
-    );
-}
 struct Feeds {
     camera: Option<CameraSlot>,
     hand: Option<hand_overlay::Slot>,
@@ -797,7 +796,7 @@ impl eframe::App for App {
         self.hud.receive(ctx, now);
         let (palette, sun) = self.hud.palette(now, unix, self.config.lat, self.config.lon);
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(strip_paint::color(palette.bg)))
+            .frame(egui::Frame::NONE.fill(strip_paint::color(palette.sky_bottom)))
             .show(ctx, |ui| {
                 let canvas = ui.max_rect();
                 size = [canvas.width(), canvas.height()];
@@ -808,7 +807,15 @@ impl eframe::App for App {
                 });
                 self.receive(ctx, scene_size, now);
                 let painter = ui.painter_at(canvas);
-                strip_paint::backdrop(&painter, canvas, &palette, now);
+                let tones: Vec<[u8; 3]> = self
+                    .current
+                    .as_ref()
+                    .map(|c| c.photos.iter().map(|p| p.tone).collect())
+                    .unwrap_or_default();
+                art::sky(&painter, canvas, &palette);
+                art::stars(&painter, canvas, art::night(sun.elevation_deg), now);
+                art::aurora(&painter, canvas, &tones, &palette, now);
+                art::weather(&painter, canvas, self.hud.mood, now);
                 let alpha = self.timeline.alpha(now);
                 let area = split.map_or(canvas, |s| {
                     egui::Rect::from_min_size(
@@ -823,14 +830,12 @@ impl eframe::App for App {
                 let cam = Camera {
                     yaw: yaw + side * 0.09 * kick,
                     pitch,
-                    dolly: 340.0 * kick,
+                    // Sit the collage slightly back so the sway never pushes a print
+                    // into the strip; the scene change starts further away still.
+                    dolly: area.width() * 0.07 + 340.0 * kick,
                     ..Camera::new([area.center().x, area.center().y], area.width() * 1.1)
                 };
-                {
-                    let back = painter.with_clip_rect(area.expand(8.0));
-                    depth::floor(&back, &cam, area, &palette, now);
-                    depth::particles(&back, &cam, area, &palette, now, 140);
-                }
+                art::bokeh(&painter, &cam, area, &palette, &tones, now);
                 let push_in = self.timeline.push_in(now);
                 let current_pose = |order: usize| {
                     let m = self.timeline.card(now, order);
@@ -860,10 +865,12 @@ impl eframe::App for App {
                 let live_skip =
                     live_target.and_then(|p| self.camera_texture.is_some().then_some(p.index));
                 if let Some(previous) = &self.previous {
-                    draws += paint_scene(&painter, previous, origin, &cam, None, &palette, &self.hud, now, previous_pose);
+                    draws += paint_scene(&painter, previous, origin, &cam, None, &palette, &self.hud, now, previous_pose, |_| None);
                 }
                 if let Some(current) = &self.current {
-                    draws += paint_scene(&painter, current, origin, &cam, live_skip, &palette, &self.hud, now, current_pose);
+                    draws += paint_scene(&painter, current, origin, &cam, live_skip, &palette, &self.hud, now, current_pose, |order| {
+                        self.timeline.glare(now, order)
+                    });
                 } else {
                     painter.text(
                         canvas.center(),
@@ -879,9 +886,6 @@ impl eframe::App for App {
                         strip_paint::color(palette.dim),
                     );
                 }
-                if let (Some(split), Some(p)) = (&split, self.timeline.sweep(now)) {
-                    strip_paint::sweep(&painter, split.collage, canvas.min, &palette, p);
-                }
                 if let Some(split) = &split {
                     let names: Vec<String> = self
                         .current
@@ -889,7 +893,6 @@ impl eframe::App for App {
                         .map(|c| c.photos.iter().map(|p| p.name.clone()).collect())
                         .unwrap_or_default();
                     self.hud.scene(&names);
-                    let photos = self.current.as_ref().map_or(0, |c| c.layout.placements.len());
                     self.hud.paint(
                         &painter,
                         canvas.min,
@@ -898,8 +901,6 @@ impl eframe::App for App {
                         sun,
                         now,
                         (self.config.lat, self.config.lon),
-                        self.counts.scene_id,
-                        photos,
                     );
                 }
                 if !self.config.strip {
@@ -975,32 +976,21 @@ impl eframe::App for App {
                                 });
                                 let pose = current_pose(order);
                                 let a = pose.alpha;
-                                let corners = lift(card, card, pose);
-                                depth::filled(&painter, &cam, &corners, strip_paint::alpha(palette.bg, a));
+                                let image = lift(target, card, pose);
+                                let print = lift(target.expand(matte(target)), card, pose);
+                                depth::shadow(&painter, &cam, &print, a * 1.6);
+                                depth::filled(&painter, &cam, &print, Color32::from_rgba_unmultiplied(250, 248, 244, (a * 255.0) as u8));
                                 depth::textured(
                                     &painter,
                                     &cam,
-                                    &lift(target, card, pose),
+                                    &image,
                                     texture.id(),
                                     uv_of(cover_uv(size, target.size())),
                                     Color32::from_white_alpha((a * 255.0) as u8),
                                     8,
                                 );
-                                depth::outline(
-                                    &painter,
-                                    &cam,
-                                    &corners,
-                                    Stroke::new(1_f32, strip_paint::alpha(palette.border, 0.7 * a)),
-                                );
-                                depth::brackets(
-                                    &painter,
-                                    &cam,
-                                    &lift(card.expand(3.0), card, pose),
-                                    0.08,
-                                    Stroke::new(1.5, strip_paint::alpha(palette.accent, a)),
-                                );
-                                if let Some(screen) = screen_box(&cam, &lift(target, card, pose)) {
-                                    live_badge(&painter, screen, now);
+                                if let Some(screen) = screen_box(&cam, &image) {
+                                    strip_paint::live_pill(&painter, screen, now, a);
                                 }
                                 camera_drawn = true;
                             }

@@ -48,7 +48,6 @@ pub struct Blocks {
     pub clock: Rect,
     pub weather: Rect,
     pub map: Rect,
-    pub telemetry: Rect,
     pub rain: Rect,
     pub footer: Rect,
     /// Points per design unit: everything in the strip scales with this.
@@ -56,37 +55,32 @@ pub struct Blocks {
 }
 pub fn blocks(strip: Rect) -> Blocks {
     let k = (strip.h / 1000.0).clamp(0.45, 1.5);
-    let pad = 20.0 * k;
-    let gap = 12.0 * k;
+    let pad = 28.0 * k;
+    let gap = 22.0 * k;
     let x = strip.x + pad;
     let w = (strip.w - 2.0 * pad).max(0.0);
     let row = |y: f32, h: f32| Rect { x, y, w, h };
-    let clock = row(strip.y + pad, 104.0 * k);
-    let weather = row(clock.y + clock.h + gap, 36.0 * k);
-    let footer_h = 46.0 * k;
+    let clock = row(strip.y + pad, 150.0 * k);
+    let weather = row(clock.y + clock.h + gap * 0.5, 64.0 * k);
+    let footer_h = 40.0 * k;
     let footer = row(strip.y + strip.h - pad - footer_h, footer_h);
-    let rain_h = 96.0 * k;
+    let rain_h = 128.0 * k;
     let rain = row(footer.y - gap - rain_h, rain_h);
     let map_top = weather.y + weather.h + gap;
     let room = (rain.y - gap - map_top).max(0.0);
-    let (map_w, map_h) = if w * 0.75 <= room {
-        (w, w * 0.75)
-    } else {
-        (room / 0.75, room)
-    };
+    // As large as fits, from 4:3 up to square; spare height goes around it.
+    let map_h = room.min(w).max(0.0);
+    let map_w = if map_h < w * 0.75 { map_h / 0.75 } else { w };
     let map = Rect {
         x: x + (w - map_w) / 2.0,
-        y: map_top,
+        y: map_top + (room - map_h) / 2.0,
         w: map_w,
         h: map_h,
     };
-    let telemetry_top = map.y + map.h + gap;
-    let telemetry = row(telemetry_top, (rain.y - gap - telemetry_top).max(0.0));
     Blocks {
         clock,
         weather,
         map,
-        telemetry,
         rain,
         footer,
         scale: k,
@@ -114,7 +108,7 @@ impl View {
         match self {
             View::Globe => "地球",
             View::Japan => "雨雲 · 日本",
-            View::Local => "周辺 · 雨雲",
+            View::Local => "周辺の雨雲",
             View::Photo => "撮影地",
         }
     }
@@ -259,6 +253,8 @@ mod tests {
         }
         let s = split(1920., 1080.);
         assert_eq!(s.strip.w, 576.0);
+        let b = blocks(s.strip);
+        assert!(b.map.w > 450.0 && (b.map.w - b.map.h).abs() < 20.0, "big, nearly square map at 1080p: {b:?}");
         assert_eq!(s.collage.y, 16.0);
     }
     #[test]
@@ -284,14 +280,15 @@ mod tests {
         for (w, h) in SIZES {
             let s = split(w, h);
             let b = blocks(s.strip);
-            let order = [b.clock, b.weather, b.map, b.telemetry, b.rain, b.footer];
+            let order = [b.clock, b.weather, b.map, b.rain, b.footer];
             for r in order {
                 assert!(inside(r, s.strip), "{w}x{h} {r:?}");
             }
             for pair in order.windows(2) {
                 assert!(pair[0].y + pair[0].h <= pair[1].y + 0.01, "{w}x{h} {pair:?}");
             }
-            assert!((b.map.w / b.map.h - 4.0 / 3.0).abs() < 0.01);
+            let aspect = b.map.w / b.map.h;
+            assert!((1.0 - 0.01..=4.0 / 3.0 + 0.01).contains(&aspect), "{w}x{h} {aspect}");
             assert!(b.map.w > 0.0);
         }
     }

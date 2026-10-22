@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod art;
 pub mod atlas;
 pub mod decode;
 pub mod depth;
@@ -24,7 +25,7 @@ pub const FADE_SECONDS: f64 = 0.9;
 pub const STAGGER_SECONDS: f64 = 0.12;
 pub const RISE_POINTS: f32 = 14.0;
 pub const KEN_BURNS: f32 = 0.045;
-pub const SWEEP_SECONDS: f64 = 1.1;
+pub const GLARE_SECONDS: f64 = 1.4;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CardMotion {
@@ -67,10 +68,11 @@ impl Timeline {
             1.0 + KEN_BURNS * (p * (2.0 - p)) as f32
         })
     }
-    /// Progress 0..1 of the scan that sweeps the collage after a commit, or None.
-    pub fn sweep(&self, now: f64) -> Option<f32> {
-        let t = now - self.committed_at?;
-        (0.0..SWEEP_SECONDS).contains(&t).then(|| (t / SWEEP_SECONDS) as f32)
+    /// Progress 0..1 of the light glancing across card `order` once it has
+    /// landed, or None outside that moment.
+    pub fn glare(&self, now: f64, order: usize) -> Option<f32> {
+        let t = now - self.committed_at? - order as f64 * STAGGER_SECONDS - FADE_SECONDS;
+        (0.0..GLARE_SECONDS).contains(&t).then(|| (t / GLARE_SECONDS) as f32)
     }
     pub fn due(&self, now: f64) -> bool {
         self.committed_at
@@ -96,16 +98,18 @@ mod tests {
         assert!(!t.due(18.0));
     }
     #[test]
-    fn push_in_and_sweep_follow_the_commit() {
+    fn push_in_and_glare_follow_the_commit() {
         let mut t = Timeline::default();
-        assert_eq!((t.push_in(5.0), t.sweep(5.0)), (1.0, None));
+        assert_eq!((t.push_in(5.0), t.glare(5.0, 0)), (1.0, None));
         t.commit(10.0);
         assert_eq!(t.push_in(10.0), 1.0);
         assert!((t.push_in(10.0 + ADVANCE_SECONDS) - (1.0 + KEN_BURNS)).abs() < 1e-6);
         assert!(t.push_in(16.0) > 1.0 + KEN_BURNS / 2.0, "eases out");
-        assert_eq!(t.sweep(10.0), Some(0.0));
-        assert!((t.sweep(10.55).unwrap() - 0.5).abs() < 1e-6);
-        assert_eq!(t.sweep(10.0 + SWEEP_SECONDS + 0.01), None);
+        assert_eq!(t.glare(10.5, 0), None, "waits for the card to land");
+        assert_eq!(t.glare(10.0 + FADE_SECONDS + 0.01, 1), None, "later cards later");
+        let mid = t.glare(10.0 + FADE_SECONDS + 0.7, 0).unwrap();
+        assert!((mid - 0.5).abs() < 1e-3);
+        assert_eq!(t.glare(10.0 + FADE_SECONDS + GLARE_SECONDS + 0.01, 0), None);
     }
     #[test]
     fn cards_enter_one_after_another() {

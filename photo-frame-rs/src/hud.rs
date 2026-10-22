@@ -3,7 +3,7 @@ use crate::{
     atlas::{self, AtlasEvent, AtlasSlot},
     globe,
     strip::{self, Split, View},
-    strip_paint::{self, CardState, GlobeLayer, MapCard, MapLayer, PlaceLayer, StripInfo, Telemetry},
+    strip_paint::{self, CardState, GlobeLayer, MapCard, MapLayer, PlaceLayer, StripInfo},
     theme::{self, Eased, Mood, Palette, Sun},
 };
 use eframe::egui::{self, Pos2, TextureHandle, TextureOptions};
@@ -192,7 +192,6 @@ impl Hud {
                 frames: &v.frames,
                 now_index: v.now_index,
                 office: v.office,
-                office_coords: office,
             }))
         };
         // The globe drifts ±20° around the office; far photo places pull it there.
@@ -203,7 +202,7 @@ impl Hud {
             View::Japan => map(0),
             View::Local => map(1),
             View::Photo => self.scene_place().and_then(|(p, tex)| match tex {
-                Some(t) if p.near => Some(MapCard::Place(PlaceLayer { map: t, place: &p.place, coords: (p.lat, p.lon) })),
+                Some(t) if p.near => Some(MapCard::Place(PlaceLayer { map: t, place: &p.place })),
                 _ => {
                     let t = ((elapsed / 2.0).clamp(0.0, 1.0) * std::f64::consts::PI / 2.0).sin();
                     let centre = globe::slerp_lonlat((office.0 * 0.7, office.1), (p.lat, p.lon), t);
@@ -223,8 +222,6 @@ impl Hud {
         sun: Sun,
         now: f64,
         office: (f64, f64),
-        scene_id: u64,
-        photos: usize,
     ) {
         let ready = self.ready();
         let frame = self.cycle.update(now, &ready, self.rain_expected());
@@ -238,16 +235,7 @@ impl Hud {
             weather: status.and_then(|s| s.weather.as_ref()),
             rain: status.and_then(|s| s.rain.as_ref()),
             rain_since: self.rain_since,
-            telemetry: Telemetry {
-                office,
-                sun,
-                phase: self.phase,
-                mood: self.mood,
-                atlas_state: self.state,
-                scene_id,
-                photos,
-                uptime: now,
-            },
+            sun_elevation: sun.elevation_deg,
         };
         let blocks = strip::blocks(split.strip);
         strip_paint::paint_strip(

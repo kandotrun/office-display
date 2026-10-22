@@ -1,27 +1,33 @@
 //! Time-of-day and weather mood. Pure: no egui, no clock reads.
 pub type Rgb = [u8; 3];
 
+/// A painted sky and the colours that sit on it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Palette {
-    pub bg: Rgb,
-    pub surface: Rgb,
-    pub border: Rgb,
+    pub sky_top: Rgb,
+    pub sky_bottom: Rgb,
+    /// Light that blooms through the sky and around the photos.
+    pub glow: Rgb,
+    /// Tint of the glass panels.
+    pub panel: Rgb,
     pub text: Rgb,
     pub dim: Rgb,
     pub accent: Rgb,
 }
+const CHANNELS: usize = 7;
 impl Palette {
-    fn channels(self) -> [Rgb; 6] {
-        [self.bg, self.surface, self.border, self.text, self.dim, self.accent]
+    fn channels(self) -> [Rgb; CHANNELS] {
+        [self.sky_top, self.sky_bottom, self.glow, self.panel, self.text, self.dim, self.accent]
     }
-    fn from_channels(c: [Rgb; 6]) -> Self {
+    fn from_channels(c: [Rgb; CHANNELS]) -> Self {
         Self {
-            bg: c[0],
-            surface: c[1],
-            border: c[2],
-            text: c[3],
-            dim: c[4],
-            accent: c[5],
+            sky_top: c[0],
+            sky_bottom: c[1],
+            glow: c[2],
+            panel: c[3],
+            text: c[4],
+            dim: c[5],
+            accent: c[6],
         }
     }
     pub fn lerp(self, other: Palette, t: f32) -> Palette {
@@ -29,7 +35,7 @@ impl Palette {
         Self::from_channels(std::array::from_fn(|i| mix(a[i], b[i], t)))
     }
 }
-fn mix(a: Rgb, b: Rgb, t: f32) -> Rgb {
+pub fn mix(a: Rgb, b: Rgb, t: f32) -> Rgb {
     let t = t.clamp(0.0, 1.0);
     std::array::from_fn(|i| (a[i] as f32 + (b[i] as f32 - a[i] as f32) * t).round() as u8)
 }
@@ -39,36 +45,40 @@ fn desaturate(c: Rgb, t: f32) -> Rgb {
 }
 
 pub const NIGHT: Palette = Palette {
-    bg: [6, 9, 15],
-    surface: [12, 18, 28],
-    border: [48, 68, 92],
-    text: [222, 232, 242],
-    dim: [104, 122, 142],
-    accent: [96, 196, 255],
+    sky_top: [8, 12, 34],
+    sky_bottom: [36, 30, 78],
+    glow: [110, 122, 255],
+    panel: [10, 14, 38],
+    text: [246, 247, 255],
+    dim: [180, 188, 218],
+    accent: [150, 182, 255],
 };
 pub const TWILIGHT: Palette = Palette {
-    bg: [12, 11, 24],
-    surface: [22, 20, 38],
-    border: [76, 70, 112],
-    text: [236, 234, 246],
-    dim: [128, 122, 152],
-    accent: [182, 150, 255],
+    sky_top: [30, 36, 96],
+    sky_bottom: [214, 112, 150],
+    glow: [255, 150, 182],
+    panel: [26, 22, 58],
+    text: [255, 250, 252],
+    dim: [230, 204, 218],
+    accent: [255, 180, 208],
 };
 pub const GOLDEN: Palette = Palette {
-    bg: [20, 14, 12],
-    surface: [32, 24, 20],
-    border: [108, 84, 66],
-    text: [246, 236, 224],
-    dim: [152, 130, 112],
-    accent: [255, 168, 84],
+    sky_top: [64, 92, 170],
+    sky_bottom: [255, 176, 110],
+    glow: [255, 214, 140],
+    panel: [40, 34, 66],
+    text: [255, 252, 246],
+    dim: [244, 224, 204],
+    accent: [255, 200, 122],
 };
 pub const DAY: Palette = Palette {
-    bg: [11, 15, 21],
-    surface: [20, 27, 36],
-    border: [88, 108, 128],
-    text: [236, 242, 247],
-    dim: [132, 151, 167],
-    accent: [104, 220, 255],
+    sky_top: [40, 116, 212],
+    sky_bottom: [156, 206, 246],
+    glow: [255, 255, 255],
+    panel: [16, 44, 92],
+    text: [255, 255, 255],
+    dim: [224, 238, 252],
+    accent: [255, 234, 150],
 };
 const ANCHORS: [(f64, Palette); 4] = [(-12.0, NIGHT), (-3.0, TWILIGHT), (6.0, GOLDEN), (20.0, DAY)];
 
@@ -149,16 +159,22 @@ pub fn palette(elevation_deg: f64, mood: Option<Mood>) -> Palette {
     };
     match mood {
         Some(Mood::Rain) => Palette {
-            bg: mix(base.bg, [8, 14, 26], 0.3),
-            surface: mix(base.surface, [10, 18, 32], 0.3),
-            border: mix(base.border, [52, 82, 120], 0.3),
-            accent: mix(base.accent, [90, 160, 255], 0.5),
+            sky_top: mix(base.sky_top, [64, 78, 104], 0.5),
+            sky_bottom: mix(base.sky_bottom, [118, 134, 156], 0.5),
+            glow: mix(base.glow, [170, 192, 224], 0.5),
+            accent: mix(base.accent, [150, 204, 255], 0.6),
             ..base
         },
-        Some(Mood::Cloudy) => Palette::from_channels(base.channels().map(|c| desaturate(c, 0.4))),
+        Some(Mood::Cloudy) => Palette {
+            sky_top: desaturate(base.sky_top, 0.45),
+            sky_bottom: desaturate(base.sky_bottom, 0.45),
+            glow: desaturate(base.glow, 0.3),
+            ..base
+        },
         Some(Mood::Snow) => Palette {
-            border: mix(base.border, [200, 215, 235], 0.3),
-            accent: mix(base.accent, [200, 215, 235], 0.3),
+            sky_top: mix(base.sky_top, [150, 170, 200], 0.3),
+            sky_bottom: mix(base.sky_bottom, [214, 224, 240], 0.4),
+            glow: mix(base.glow, [235, 242, 255], 0.4),
             ..base
         },
         Some(Mood::Clear) | None => base,
@@ -167,7 +183,7 @@ pub fn palette(elevation_deg: f64, mood: Option<Mood>) -> Palette {
 
 /// Eases the shown palette toward a target: about 95% of the way within 60 s.
 pub struct Eased {
-    current: [[f32; 3]; 6],
+    current: [[f32; 3]; CHANNELS],
     updated: f64,
 }
 pub const EASE_SECONDS: f64 = 20.0;
@@ -247,11 +263,14 @@ mod tests {
     }
     #[test]
     fn moods_shift_the_palette() {
-        let rain = palette(30.0, Some(Mood::Rain));
-        assert!(rain.accent[2] >= rain.accent[0] && rain != DAY);
-        let cloudy = palette(30.0, Some(Mood::Cloudy));
         let spread = |c: Rgb| c.iter().max().unwrap() - c.iter().min().unwrap();
-        assert!(spread(cloudy.accent) < spread(DAY.accent));
+        let rain = palette(30.0, Some(Mood::Rain));
+        assert!(rain != DAY && spread(rain.sky_top) < spread(DAY.sky_top), "rain greys the sky");
+        let cloudy = palette(30.0, Some(Mood::Cloudy));
+        assert!(spread(cloudy.sky_bottom) < spread(DAY.sky_bottom));
+        assert_eq!(cloudy.text, DAY.text, "text keeps its contrast");
+        let snow = palette(30.0, Some(Mood::Snow));
+        assert!(snow.sky_bottom[0] > DAY.sky_bottom[0]);
         assert_eq!(Mood::parse("snow"), Some(Mood::Snow));
         assert_eq!(Mood::parse("fog"), None);
         assert_eq!(Mood::Rain.name(), "rain");
@@ -264,7 +283,8 @@ mod tests {
         let p = e.step(DAY, 60.0);
         for (a, b) in p.channels().iter().zip(DAY.channels()) {
             for i in 0..3 {
-                assert!((a[i] as i32 - b[i] as i32).abs() <= 8);
+                // About 95% of the way: within 5% of the largest possible gap.
+                assert!((a[i] as i32 - b[i] as i32).abs() <= 13);
             }
         }
         assert_eq!(e.step(DAY, 1e6), DAY);

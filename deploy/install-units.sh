@@ -15,15 +15,34 @@ HOME_DIR=${HOME_DIR:-/home/$DISPLAY_USER}
 APP_ROOT=${APP_ROOT:-$HOME_DIR/photo-frame-rs}
 PYTHON=${PYTHON:-python3}
 AUDIO_DEVICE=${AUDIO_DEVICE:-plughw:0,0}
+# The office (public): Hiroshima, its JMA forecast office / area and the
+# AMeDAS point for temperatures (67437 = 広島).
+ATLAS_LAT=${ATLAS_LAT:-34.4080}
+ATLAS_LON=${ATLAS_LON:-132.4547}
+ATLAS_FORECAST_OFFICE=${ATLAS_FORECAST_OFFICE:-340000}
+ATLAS_FORECAST_AREA=${ATLAS_FORECAST_AREA:-340010}
+ATLAS_TEMP_POINT=${ATLAS_TEMP_POINT:-67437}
 TARGET="$DISPLAY_USER@$DISPLAY_HOST"
 SSH="ssh ${SSH_OPTS:-} $TARGET"
+
+# These end up in a unit file through sed; only plain numbers are accepted.
+for value in "$ATLAS_LAT" "$ATLAS_LON" "$ATLAS_FORECAST_OFFICE" "$ATLAS_FORECAST_AREA" "$ATLAS_TEMP_POINT"; do
+    case "$value" in
+        "" | *[!0-9.-]*) echo "invalid atlas setting: $value" >&2; exit 1 ;;
+    esac
+done
 
 render() {
     sed -e "s|@USER@|$DISPLAY_USER|g" \
         -e "s|@HOME@|$HOME_DIR|g" \
         -e "s|@APP_ROOT@|$APP_ROOT|g" \
         -e "s|@PYTHON@|$PYTHON|g" \
-        -e "s|@AUDIO_DEVICE@|$AUDIO_DEVICE|g" "$1"
+        -e "s|@AUDIO_DEVICE@|$AUDIO_DEVICE|g" \
+        -e "s|@ATLAS_LAT@|$ATLAS_LAT|g" \
+        -e "s|@ATLAS_LON@|$ATLAS_LON|g" \
+        -e "s|@ATLAS_FORECAST_OFFICE@|$ATLAS_FORECAST_OFFICE|g" \
+        -e "s|@ATLAS_FORECAST_AREA@|$ATLAS_FORECAST_AREA|g" \
+        -e "s|@ATLAS_TEMP_POINT@|$ATLAS_TEMP_POINT|g" "$1"
 }
 
 # presence-dimmer (plain python, no dependencies)
@@ -42,8 +61,12 @@ tar cf - -C speech . | $SSH "tar xf - -C $HOME_DIR/speech"
 $SSH "mkdir -p $HOME_DIR/office-stats"
 tar cf - -C stats . | $SSH "tar xf - -C $HOME_DIR/office-stats"
 
+# atlas (the only service that talks to the internet; numpy + Pillow)
+$SSH "mkdir -p $HOME_DIR/atlas"
+tar cf - --exclude=./tests --exclude=__pycache__ --exclude=.pytest_cache -C atlas . | $SSH "tar xf - -C $HOME_DIR/atlas"
+
 # systemd units
-for unit in photo-frame-rs.service presence-dimmer.service room-survey.service office-stats.service speech.service; do
+for unit in photo-frame-rs.service presence-dimmer.service room-survey.service office-stats.service speech.service atlas.service; do
     echo "installing $unit"
     render "systemd/$unit" | $SSH "sudo tee /etc/systemd/system/$unit >/dev/null"
 done
@@ -53,7 +76,7 @@ render display-session/xinitrc | $SSH "cat > $HOME_DIR/.xinitrc && chmod +x $HOM
 render display-session/bash_profile | $SSH "cat > $HOME_DIR/.bash_profile"
 
 $SSH "sudo systemctl daemon-reload && \
-      sudo systemctl enable photo-frame-rs.service presence-dimmer.service room-survey.service office-stats.service speech.service"
+      sudo systemctl enable photo-frame-rs.service presence-dimmer.service room-survey.service office-stats.service speech.service atlas.service"
 
 echo "installed. X session changes apply on the next reboot."
 echo "The photo frame starts from $APP_ROOT/current/bin — run build-and-deploy.sh first."

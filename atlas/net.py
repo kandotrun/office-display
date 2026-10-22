@@ -1,4 +1,5 @@
 """The only place atlas talks HTTP: bounded reads, an identifying User-Agent."""
+import http.client
 import os
 import threading
 import time
@@ -30,8 +31,10 @@ def _read(open_fn, url, timeout, max_bytes):
             data = resp.read(max_bytes + 1)
     except urllib.error.HTTPError as exc:
         raise FetchError(url, exc.code, exc.reason) from None
-    except (urllib.error.URLError, OSError, ValueError) as exc:
-        raise FetchError(url, None, str(exc)) from None
+    except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as exc:
+        # HTTPException: IncompleteRead, BadStatusLine, LineTooLong, ... are
+        # network failures like any other, not crashes
+        raise FetchError(url, None, str(exc) or type(exc).__name__) from None
     if len(data) > max_bytes:
         raise FetchError(url, None, "response larger than %d bytes" % max_bytes)
     return data

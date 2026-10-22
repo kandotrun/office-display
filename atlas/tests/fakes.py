@@ -2,7 +2,7 @@
 import io
 import json
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlparse
 
 from PIL import Image, ImageDraw
@@ -78,49 +78,67 @@ def osm_tile(z, x, y):
     return png(img)
 
 
-def forecast(area_code="130010", temp_point="44132", temps=("14", "21")):
-    """bosai/forecast/data/forecast/130000.json, trimmed to the parts atlas reads."""
+REPORT_DAY = date(2026, 10, 22)
+
+
+def forecast(area_code="130010", temp_point="44132", report="11:00", temps=None, day=REPORT_DAY):
+    """bosai/forecast/data/forecast/130000.json, trimmed to the parts atlas reads.
+
+    Shaped like the regular report at `report` (05:00, 11:00 or 17:00 JST) on
+    `day`. The temperature series (timeSeries[2]) is, as JMA publishes it:
+
+    * 05:00 and 11:00: [today 09:00, today 00:00, tomorrow 00:00, tomorrow
+      09:00]; today's 00:00 slot is no minimum (the morning is over) and
+      repeats today's maximum,
+    * 17:00: only tomorrow, [00:00 (minimum), 09:00 (maximum)].
+    """
+    d0, d1, d2 = (day + timedelta(days=k) for k in range(3))
+
+    def at(d, hm):
+        return "%sT%s:00+09:00" % (d.isoformat(), hm)
+
+    if report == "17:00":
+        temp_defines = [at(d1, "00:00"), at(d1, "09:00")]
+        main, other = ("14", "22"), ("16", "23")
+    else:
+        temp_defines = [at(d0, "09:00"), at(d0, "00:00"), at(d1, "00:00"), at(d1, "09:00")]
+        main, other = ("21", "21", "14", "22"), ("22", "22", "16", "23")
+    # the 05:00 report has no day after tomorrow yet
+    weather_defines = [at(d0, report), at(d1, "00:00")] + ([] if report == "05:00" else [at(d2, "00:00")])
+    n = len(weather_defines)
+    first_pop = int(report[:2]) + 1
+    pop_defines = [at(d0, "%02d:00" % h) for h in (6, 12, 18) if h >= first_pop]
+    pop_defines += [at(d1, "%02d:00" % h) for h in (0, 6, 12, 18)]
     return [
         {
             "publishingOffice": "気象庁",
-            "reportDatetime": "2026-10-22T11:00:00+09:00",
+            "reportDatetime": at(d0, report),
             "timeSeries": [
                 {
-                    "timeDefines": [
-                        "2026-10-22T11:00:00+09:00",
-                        "2026-10-23T00:00:00+09:00",
-                        "2026-10-24T00:00:00+09:00",
-                    ],
+                    "timeDefines": weather_defines,
                     "areas": [
                         {
                             "area": {"name": "東京地方", "code": area_code},
-                            "weatherCodes": ["200", "201", "101"],
-                            "weathers": ["くもり　夜　雨", "くもり　時々　晴れ", "晴れ"],
-                            "winds": ["北の風", "北の風", "北の風"],
+                            "weatherCodes": ["200", "101", "300"][:n],
+                            "weathers": ["くもり　夜　雨", "晴れ　時々　くもり", "雨"][:n],
+                            "winds": ["北の風", "北の風", "北の風"][:n],
                         },
                         {
                             "area": {"name": "伊豆諸島北部", "code": "130020"},
-                            "weatherCodes": ["313", "200", "100"],
-                            "weathers": ["雨　のち　くもり", "くもり", "晴れ"],
+                            "weatherCodes": ["313", "200", "100"][:n],
+                            "weathers": ["雨　のち　くもり", "くもり", "晴れ"][:n],
                         },
                     ],
                 },
                 {
-                    "timeDefines": ["2026-10-22T12:00:00+09:00", "2026-10-22T18:00:00+09:00"],
-                    "areas": [{"area": {"name": "東京地方", "code": area_code}, "pops": ["20", "60"]}],
+                    "timeDefines": pop_defines,
+                    "areas": [{"area": {"name": "東京地方", "code": area_code}, "pops": ["20"] * len(pop_defines)}],
                 },
                 {
-                    "timeDefines": ["2026-10-23T00:00:00+09:00", "2026-10-23T09:00:00+09:00"][: len(temps)]
-                    if len(temps) <= 2
-                    else [
-                        "2026-10-22T00:00:00+09:00",
-                        "2026-10-22T09:00:00+09:00",
-                        "2026-10-23T00:00:00+09:00",
-                        "2026-10-23T09:00:00+09:00",
-                    ],
+                    "timeDefines": temp_defines,
                     "areas": [
-                        {"area": {"name": "東京", "code": temp_point}, "temps": list(temps)},
-                        {"area": {"name": "大島", "code": "44172"}, "temps": ["16", "22"]},
+                        {"area": {"name": "東京", "code": temp_point}, "temps": list(main if temps is None else temps)},
+                        {"area": {"name": "大島", "code": "44172"}, "temps": list(other)},
                     ],
                 },
             ],
@@ -164,6 +182,8 @@ class FakeNet:
         self.rain_from = rain_from
         self.rain_color = rain_color
         self.photos = dict(photos or {})
+        self.forecast_report = "17:00"  # the regular report before NOW (18:05 JST)
+        self.forecast_day = REPORT_DAY
 
     def count(self, part):
         return sum(part in c for c in self.calls)
@@ -186,7 +206,7 @@ class FakeNet:
             wet = self.rain_from is not None and valid >= NOW + timedelta(minutes=self.rain_from)
             return jma_tile(self.rain_color if wet else None)
         if url.endswith("/bosai/forecast/data/forecast/340000.json"):
-            body = forecast(area_code="340010", temp_point="67437", temps=("15", "22"))
+            body = forecast("340010", "67437", report=self.forecast_report, day=self.forecast_day)
             return json.dumps(body, ensure_ascii=False).encode()
         if url.endswith("/bosai/forecast/data/forecast/130000.json"):
             return json.dumps(forecast(), ensure_ascii=False).encode()

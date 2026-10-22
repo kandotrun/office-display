@@ -1,5 +1,13 @@
-"""JMA forecast (bosai/forecast/data/forecast/<office>.json): label, mood, temps."""
+"""JMA forecast (bosai/forecast/data/forecast/<office>.json): label, mood, temps.
 
+Everything is picked for one JST calendar day ("today" of the caller), by the
+dates in timeDefines, never by position: the temperature series of the 05:00
+and 11:00 reports is [today 09:00, today 00:00, tomorrow 00:00, tomorrow
+09:00], that of the 17:00 report only [tomorrow 00:00, tomorrow 09:00].
+"""
+from datetime import datetime, timedelta, timezone
+
+JST = timezone(timedelta(hours=9))
 FORECAST_URL = "https://www.jma.go.jp/bosai/forecast/data/forecast/{office}.json"
 MOODS = {"1": "clear", "2": "cloudy", "3": "rain", "4": "snow"}
 
@@ -21,19 +29,48 @@ def _temp(value):
         return None
 
 
-def pick_temps(temps, defines=()):
-    """(min, max) from a temps list: 00:00 entries are minima, 09:00 maxima.
+def jst_date(epoch):
+    """The JST calendar day of an epoch timestamp."""
+    return datetime.fromtimestamp(epoch, JST).date()
 
-    With 2 or 4 entries this is the last pair; a lone entry uses its time.
+
+def _jst(stamp):
+    """A timeDefines / reportDatetime stamp as an aware JST datetime, or None."""
+    try:
+        t = datetime.fromisoformat(str(stamp))
+    except ValueError:
+        return None
+    return t.astimezone(JST) if t.tzinfo is not None else None
+
+
+def pick_temps(temps, defines, today, issued=None):
+    """Today's (min, max): the entries dated `today` (JST) at 00:00 and 09:00.
+
+    The 09:00 entry is the daytime maximum. A report issued on `today` itself
+    (05:00, 11:00) has no minimum for it: the morning is over and the 00:00
+    slot only repeats the maximum. So the 00:00 entry counts only when the
+    report was issued before `today` (yesterday's 17:00 report after
+    midnight). Anything for another day is ignored, never a stand-in.
     """
-    temps = list(temps or [])
-    defines = list(defines or [])
-    if len(temps) >= 2:
-        return _temp(temps[-2]), _temp(temps[-1])
-    if len(temps) == 1:
-        hour = str(defines[0])[11:13] if len(defines) == 1 else ""
-        return (None, _temp(temps[0])) if hour == "09" else (_temp(temps[0]), None)
-    return None, None
+    tmin = tmax = None
+    for value, define in zip(temps or (), defines or ()):
+        t = _jst(define)
+        if t is None or t.date() != today or t.minute or t.second:
+            continue
+        if t.hour == 9:
+            tmax = _temp(value)
+        elif t.hour == 0 and issued is not None and issued < today:
+            tmin = _temp(value)
+    return tmin, tmax
+
+
+def _day_index(defines, today):
+    """Index of the first timeDefine on `today` (JST), else 0."""
+    for i, define in enumerate(defines or ()):
+        t = _jst(define)
+        if t is not None and t.date() == today:
+            return i
+    return 0
 
 
 def _area(areas, code):
@@ -43,21 +80,27 @@ def _area(areas, code):
     return None
 
 
-def parse_forecast(data, area_code, temp_point):
-    """{"mood", "label", "max", "min"} for an area, or None when it is not there."""
+def parse_forecast(data, area_code, temp_point, today):
+    """{"mood", "label", "max", "min"} for an area on `today` (a JST date), or
+    None when the area is not there."""
     try:
-        series = data[0]["timeSeries"]
+        report = data[0]
+        series = report["timeSeries"]
         area = _area(series[0]["areas"], area_code)
-        code = area["weatherCodes"][0]
-        label = normalise_label(area["weathers"][0])
+        i = _day_index(series[0].get("timeDefines"), today)
+        code = area["weatherCodes"][i]
+        label = normalise_label(area["weathers"][i])
     except (LookupError, TypeError, AttributeError):
         return None
+    issued = _jst(report.get("reportDatetime"))
     tmin = tmax = None
     try:
         temps = series[2]
         point = _area(temps["areas"], temp_point)
         if point is not None:
-            tmin, tmax = pick_temps(point.get("temps"), temps.get("timeDefines"))
+            tmin, tmax = pick_temps(
+                point.get("temps"), temps.get("timeDefines"), today, issued.date() if issued else None
+            )
     except (LookupError, TypeError, AttributeError):
         pass
     return {"mood": mood_of(code), "label": label, "max": tmax, "min": tmin}

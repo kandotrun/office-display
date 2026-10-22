@@ -78,5 +78,10 @@ render display-session/bash_profile | $SSH "cat > $HOME_DIR/.bash_profile"
 $SSH "sudo systemctl daemon-reload && \
       sudo systemctl enable photo-frame-rs.service presence-dimmer.service room-survey.service office-stats.service speech.service atlas.service"
 
-echo "installed. X session changes apply on the next reboot."
+# atlas has no build step: the code copied above only runs after a (re)start.
+# enable --now starts it on a first install, try-restart picks up new code.
+$SSH "sudo systemctl enable --now atlas.service && \
+      sudo systemctl try-restart atlas.service"
+
+echo "installed. atlas restarted; X session changes apply on the next reboot."
 echo "The photo frame starts from $APP_ROOT/current/bin — run build-and-deploy.sh first."

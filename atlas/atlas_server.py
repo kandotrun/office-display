@@ -49,7 +49,7 @@ WEATHER_EVERY = (1800, 300)
 GLOBE_EVERY = (3600, 1800)  # the day texture changes once per UTC day
 MAPS_EVERY = (86400, 600)  # tiles stay cached for 7 days, so this is cheap
 
-RADAR_STALE = 30 * 60
+RADAR_STALE = 30 * 60  # measured from the newest observation, not the fetch
 WEATHER_STALE = 6 * 3600
 
 JAPAN_BOX = (128.0, 30.0, 146.0, 46.0)
@@ -81,14 +81,28 @@ def next_rev(rev, old, new):
     return rev if old == new else rev + 1
 
 
+def unit_point(point):
+    """A normalised image coordinate rounded for /status, or None outside [0, 1].
+
+    The Rust client rejects the whole document for one value outside [0, 1]
+    (NaN included), so nothing like that is ever emitted.
+    """
+    out = [round(float(c), 4) + 0.0 for c in point]  # + 0.0: no "-0.0"
+    return out if all(0.0 <= c <= 1.0 for c in out) else None
+
+
 def build_status(snap, now):
     """The /status document from a state snapshot (pure)."""
+    # radar_at is the time of the newest observation: frames that stop
+    # advancing go stale even while every fetch succeeds
     radar_fresh = snap["radar_at"] is not None and now - snap["radar_at"] <= RADAR_STALE
     weather_fresh = snap["weather_at"] is not None and now - snap["weather_at"] <= WEATHER_STALE
     views = {"globe": dict(snap["globe"]) if snap["globe"] else None}
     for name in ("japan", "local"):
         view = snap["views"].get(name)
-        if view is None:
+        office = unit_point(view["office"]) if view is not None else None
+        if office is None:
+            # the client requires an office marker; a view without one is no view
             views[name] = None
             continue
         frames = view["frames"] if radar_fresh else []
@@ -97,7 +111,7 @@ def build_status(snap, now):
             "frames": [{"at": iso(f.at), "forecast": bool(f.forecast)} for f in frames],
             # always an integer (the client parses usize); only meaningful with frames
             "now_index": view["now_index"] if frames else 0,
-            "office": [round(view["office"][0], 4), round(view["office"][1], 4)],
+            "office": office,
         }
     lat, lon = snap["office"]
     return {
@@ -182,7 +196,7 @@ class Atlas:
         self.weather = None
         self.weather_at = None
         self.rain = None
-        self.radar_at = None
+        self.radar_at = None  # epoch of the newest observation behind rain / frames
         self.globe_day = None
         self.globe_night = None
         self.globe_rev = 0
@@ -233,32 +247,41 @@ class Atlas:
         frames, now_index = radar.pick_frames(past, future)
         if not frames:
             raise RuntimeError("no radar frames in targetTimes")
+        newest = past[-1].at
+        if self.clock() - newest.timestamp() > RADAR_STALE:
+            # targetTimes stopped advancing: no tiles for old frames, and the
+            # state ages out in build_status
+            raise RuntimeError("radar targetTimes stuck at %s" % iso(newest))
         src = self.radar_tiles
         src.begin()
-        overlays = {}
-        for view in self.views.values():
-            overlays[view.name] = [
-                radar.png_bytes(radar.render_frame(src.index, view.extent, view.radar_zoom, f, blur=view.blur))
-                for f in frames
-            ]
-        level = radar.office_level(src.index, frames[now_index], self.lon, self.lat, OFFICE_RADAR_ZOOM)
-        ahead = radar.series_frames(past, future)
-        series = radar.fill_series(
-            [radar.office_level(src.index, f, self.lon, self.lat, OFFICE_RADAR_ZOOM) if f else None for f in ahead],
-            start=level,
-        )
-        # newest observed, not "now": tiles fetched ahead of N2 are kept too
-        src.end(past[-1].at)
+        try:
+            overlays = {}
+            for view in self.views.values():
+                overlays[view.name] = [
+                    radar.png_bytes(radar.render_frame(src.index, view.extent, view.radar_zoom, f, blur=view.blur))
+                    for f in frames
+                ]
+            level = radar.office_level(src.index, frames[now_index], self.lon, self.lat, OFFICE_RADAR_ZOOM)
+            ahead = radar.series_frames(past, future)
+            series = radar.fill_series(
+                [radar.office_level(src.index, f, self.lon, self.lat, OFFICE_RADAR_ZOOM) if f else None for f in ahead],
+                start=level,
+            )
+        finally:
+            # pruned on failures too, so a failing streak cannot grow the memo;
+            # newest observed, not "now": tiles fetched ahead of N2 are kept too
+            src.end(newest)
         rain = {"summary": radar.summary(level, series), "level": level, "series": series}
         with self.lock:
             for view in self.views.values():
                 view.set_radar(frames, now_index, overlays[view.name])
             self.rain = rain
-            self.radar_at = self.clock()
+            self.radar_at = newest.timestamp()
 
     def refresh_weather(self):
         data = json.loads(self.fetch(self.forecast_url))
-        parsed = weather.parse_forecast(data, self.forecast_area, self.temp_point)
+        today = weather.jst_date(self.clock())
+        parsed = weather.parse_forecast(data, self.forecast_area, self.temp_point, today)
         if parsed is None:
             raise RuntimeError("forecast area %s not found" % self.forecast_area)
         with self.lock:
@@ -339,6 +362,17 @@ class Atlas:
         return 200, jpeg
 
 
+def failure_line(path, exc):
+    """The journal line for a failed request.
+
+    Photo names are never written anywhere: for photo routes neither the path
+    nor the exception text (which may quote a URL with the name) is logged.
+    """
+    if path.startswith("/photo"):
+        return "atlas: /photo/* failed: %s" % type(exc).__name__
+    return "atlas: %s failed: %r" % (path[:64], exc)
+
+
 def make_handler(atlas):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.0"
@@ -375,7 +409,7 @@ def make_handler(atlas):
             except (BrokenPipeError, ConnectionResetError):
                 return
             except Exception as exc:
-                print("atlas: %s failed: %r" % (path[:64], exc), flush=True)
+                print(failure_line(path, exc), flush=True)
                 return self._json(500, {})
 
         def _photo(self, rest):

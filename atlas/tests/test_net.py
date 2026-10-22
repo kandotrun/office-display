@@ -1,3 +1,4 @@
+import http.client
 import io
 import urllib.error
 
@@ -52,6 +53,27 @@ def test_network_errors_have_no_status(monkeypatch):
     def urlopen(req, timeout):
         raise urllib.error.URLError("offline")
 
+    monkeypatch.setattr(net.urllib.request, "urlopen", urlopen)
+    with pytest.raises(net.FetchError) as info:
+        net.fetch("https://example.invalid/x")
+    assert info.value.status is None
+
+
+class TruncatedResponse(FakeResponse):
+    def read(self, *args):
+        raise http.client.IncompleteRead(b"par", 10)
+
+
+@pytest.mark.parametrize(
+    "urlopen",
+    [
+        lambda req, timeout: TruncatedResponse(b""),
+        lambda req, timeout: (_ for _ in ()).throw(http.client.BadStatusLine("garbage")),
+        lambda req, timeout: (_ for _ in ()).throw(http.client.RemoteDisconnected("closed")),
+        lambda req, timeout: (_ for _ in ()).throw(http.client.LineTooLong("header line")),
+    ],
+)
+def test_http_protocol_errors_are_fetch_errors(monkeypatch, urlopen):
     monkeypatch.setattr(net.urllib.request, "urlopen", urlopen)
     with pytest.raises(net.FetchError) as info:
         net.fetch("https://example.invalid/x")

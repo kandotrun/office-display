@@ -720,7 +720,9 @@ fn paint_rain(painter: &egui::Painter, rect: Rect, palette: &Palette, now: f64, 
 
 /// HUD frame around a collage card: corner ticks and a small index tag.
 pub fn card_chrome(painter: &egui::Painter, card: Rect, palette: &Palette, index: usize, opacity: f32) {
-    brackets(painter, card.expand(3.0), 14.0, Stroke::new(1.5, alpha(palette.accent, 0.75 * opacity)));
+    // Brackets close in on the card as it arrives, like a target lock.
+    let lock = 3.0 + 22.0 * (1.0 - ease(opacity));
+    brackets(painter, card.expand(lock), 14.0, Stroke::new(1.5, alpha(palette.accent, 0.75 * opacity)));
     painter.text(
         card.left_top() + Vec2::new(10.0, 8.0),
         Align2::LEFT_TOP,
@@ -728,6 +730,31 @@ pub fn card_chrome(painter: &egui::Painter, card: Rect, palette: &Palette, index
         mono(10.0),
         alpha(palette.text, 0.75 * opacity),
     );
+}
+/// A bright vertical scan crossing the collage after a new scene commits.
+pub fn sweep(painter: &egui::Painter, collage: crate::layout::Rect, origin: Pos2, palette: &Palette, progress: f32) {
+    let area = r(collage, origin);
+    let x = area.left() + ease(progress) * area.width();
+    let fade = 1.0 - progress.powi(3);
+    for i in 0..40 {
+        let xx = x - i as f32 * 3.0;
+        if xx < area.left() {
+            break;
+        }
+        let a = 0.22 * (1.0 - i as f32 / 40.0).powi(2) * fade;
+        painter.line_segment([Pos2::new(xx, area.top()), Pos2::new(xx, area.bottom())], Stroke::new(3.0, alpha(palette.accent, a)));
+    }
+    painter.line_segment([Pos2::new(x, area.top()), Pos2::new(x, area.bottom())], Stroke::new(1.5, alpha(palette.accent, 0.9 * fade)));
+    for i in 0..6 {
+        let y = area.top() + area.height() * (i as f32 + 0.5) / 6.0;
+        painter.text(
+            Pos2::new(x + 6.0, y),
+            Align2::LEFT_CENTER,
+            format!("{:03}", ((progress * 997.0) as u32 + i * 131) % 1000),
+            mono(9.0),
+            alpha(palette.accent, 0.7 * fade),
+        );
+    }
 }
 /// "◉ 京都市 · 2025.08" chip on a collage card whose photo has a place.
 pub fn place_chip(painter: &egui::Painter, card: Rect, palette: &Palette, place: &atlas::Place, now: f64, opacity: f32) {

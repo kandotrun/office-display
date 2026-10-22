@@ -297,7 +297,13 @@ fn paint_scene(
         }
         painter.rect_stroke(card, 6, border, StrokeKind::Inside);
         let foreground = rect(p.foreground, shift);
-        painter.image(photo.texture.id(), foreground, full, tint);
+        let zoom = stagger.map_or(1.0, |(timeline, now)| timeline.push_in(now));
+        painter.with_clip_rect(card.shrink(1.0)).image(
+            photo.texture.id(),
+            egui::Rect::from_center_size(foreground.center(), foreground.size() * zoom),
+            full,
+            tint,
+        );
         strip_paint::card_chrome(painter, card, palette, order, alpha);
         if let Some(place) = hud.place(&photo.name) {
             strip_paint::place_chip(painter, card, palette, place, now, alpha);
@@ -810,6 +816,9 @@ impl eframe::App for App {
                         FontId::proportional(28.),
                         strip_paint::color(palette.dim),
                     );
+                }
+                if let (Some(split), Some(p)) = (&split, self.timeline.sweep(now)) {
+                    strip_paint::sweep(&painter, split.collage, canvas.min, &palette, p);
                 }
                 if let Some(split) = &split {
                     let names: Vec<String> = self

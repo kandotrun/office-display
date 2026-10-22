@@ -34,7 +34,12 @@ fn get_with_deadline(
     if !(path == "/api/photos"
         || path == "/snapshot.jpg"
         || path.starts_with("/photos/")
-        || (port == 8097 && path == "/status"))
+        || (port == 8097 && path == "/status")
+        || (port == 8099
+            && (path == "/status"
+                || path.starts_with("/map/")
+                || path.starts_with("/globe/")
+                || path.starts_with("/photo/"))))
         || !path.is_ascii()
         || path.contains(['\r', '\n', '?', '#', '\\'])
         || path.contains("..")

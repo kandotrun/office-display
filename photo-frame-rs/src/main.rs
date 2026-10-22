@@ -5,8 +5,11 @@ use eframe::egui::{
     ViewportCommand,
 };
 use photo_frame_rs::{
-    Timeline,
+    Timeline, atlas,
     decode::DecodedPhoto,
+    hud::Hud,
+    strip, strip_paint,
+    theme::Palette,
     hand_overlay,
     layout::{self, Layout, Rect},
     navigation::{self, Decision},
@@ -35,6 +38,9 @@ struct Config {
     run_seconds: Option<f64>,
     status_port: u16,
     scale: f32,
+    strip: bool,
+    lat: f64,
+    lon: f64,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -49,6 +55,9 @@ impl Default for Config {
             run_seconds: None,
             status_port: 8096,
             scale: 1.0,
+            strip: true,
+            lat: 35.68,
+            lon: 139.77,
         }
     }
 }
@@ -86,6 +95,21 @@ fn config_from(args: impl IntoIterator<Item = String>) -> Result<Option<Config>,
             }
             "--no-camera" => c.camera = false,
             "--no-backdrops" => c.backdrops = false,
+            "--no-strip" => c.strip = false,
+            "--lat" => {
+                c.lat = args
+                    .next()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .filter(|v| (-90.0..=90.0).contains(v))
+                    .ok_or("invalid_lat")?;
+            }
+            "--lon" => {
+                c.lon = args
+                    .next()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .filter(|v| (-180.0..=180.0).contains(v))
+                    .ok_or("invalid_lon")?;
+            }
             "--run-seconds" => {
                 let n = args
                     .next()
@@ -110,7 +134,7 @@ fn config_from(args: impl IntoIterator<Item = String>) -> Result<Option<Config>,
             }
             "--help" => {
                 println!(
-                    "Native Rust photo-frame prototype\n--fullscreen (default: windowed)\n--camera | --no-camera (default: disabled; shared loopback MJPEG at source rate, target 15fps)\n--camera-port N (loopback MJPEG source port; default 8082)\n--live-tile | --no-live-tile (draw the live camera into the largest collage card instead of the corner preview; implies camera)\n--run-seconds 1..3600 (automatic window close)\n--status-port 8096 or 8098..8199 (GET /health /status, loopback only)\n--scale 0.75..3 (physical pixels per logical egui point; default 1)\n--no-backdrops (disable small RAM-only blurred covers)\n--gestures (display-only overlay; implies camera mirror)\n--gesture-controls (explicit native photo navigation: screen left=next,right=previous; implies gestures/camera)\n--no-gesture-controls (display only)\nPhoto source fixed: loopback 8081. No external URLs, credential, file input, HTTP write controls, video or gaze."
+                    "Native Rust photo-frame prototype\n--fullscreen (default: windowed)\n--camera | --no-camera (default: disabled; shared loopback MJPEG at source rate, target 15fps)\n--camera-port N (loopback MJPEG source port; default 8082)\n--live-tile | --no-live-tile (draw the live camera into the largest collage card instead of the corner preview; implies camera)\n--run-seconds 1..3600 (automatic window close)\n--status-port 8096 or 8098..8199 (GET /health /status, loopback only)\n--scale 0.75..3 (physical pixels per logical egui point; default 1)\n--no-backdrops (disable small RAM-only blurred covers)\n--gestures (display-only overlay; implies camera mirror)\n--gesture-controls (explicit native photo navigation: screen left=next,right=previous; implies gestures/camera)\n--no-gesture-controls (display only)\n--no-strip (full-width collage without the info strip / atlas)\n--lat D --lon D (office position for the sun and the map marker; default 35.68 139.77)\nPhoto source fixed: loopback 8081; atlas loopback 8099. No external URLs, credential, file input, HTTP write controls, video or gaze."
                 );
                 return Ok(None);
             }
@@ -149,6 +173,7 @@ struct GpuPhoto {
     texture: TextureHandle,
     backdrop: Option<TextureHandle>,
     aspect: f32,
+    name: String,
 }
 struct Scene {
     photos: Vec<GpuPhoto>,
@@ -192,6 +217,7 @@ fn upload(ctx: &egui::Context, photos: Vec<DecodedPhoto>, layout: Layout, size: 
                 .backdrop
                 .map(|b| ctx.load_texture("backdrop-slot", b, TextureOptions::LINEAR)),
             aspect: photo.aspect,
+            name: photo.name,
         })
         .collect();
     Scene {
@@ -221,38 +247,44 @@ fn cover_uv(texture: Vec2, target: Vec2) -> egui::Rect {
     }
 }
 /// Draw a scene. `skip_index` leaves one photo's card empty so the live camera
-/// can be drawn into it (card background and border are still painted).
+/// can be drawn into it (card background and border are still painted). With
+/// `stagger`, cards enter one after another instead of fading together.
+#[allow(clippy::too_many_arguments)]
 fn paint_scene(
     painter: &egui::Painter,
     scene: &Scene,
     origin: Pos2,
     alpha: f32,
     skip_index: Option<usize>,
+    palette: &Palette,
+    stagger: Option<(&Timeline, f64)>,
+    hud: &Hud,
 ) -> usize {
-    if alpha <= 0.0 {
+    if alpha <= 0.0 && stagger.is_none() {
         return 0;
     }
-    let tint = Color32::from_white_alpha((alpha * 255.0) as u8);
     let full = egui::Rect::from_min_max(Pos2::ZERO, Pos2::new(1., 1.));
+    let now = stagger.map_or(0.0, |(_, now)| now);
     let mut draws = 0;
-    for p in &scene.layout.placements {
+    for (order, p) in scene.layout.placements.iter().enumerate() {
+        let (alpha, rise) = match stagger {
+            Some((timeline, now)) => {
+                let m = timeline.card(now, order);
+                (m.alpha, m.rise)
+            }
+            None => (alpha, 0.0),
+        };
+        if alpha <= 0.0 {
+            continue;
+        }
+        let shift = origin + Vec2::new(0.0, rise);
         let photo = &scene.photos[p.index];
-        let card = rect(p.card, origin);
-        painter.rect_filled(
-            card,
-            12,
-            Color32::from_rgba_unmultiplied(22, 29, 38, (alpha * 255.) as u8),
-        );
+        let card = rect(p.card, shift);
+        let tint = Color32::from_white_alpha((alpha * 255.0) as u8);
+        painter.rect_filled(card, 6, strip_paint::alpha(palette.surface, alpha));
+        let border = Stroke::new(1_f32, strip_paint::alpha(palette.border, alpha * 0.5));
         if skip_index == Some(p.index) {
-            painter.rect_stroke(
-                card,
-                12,
-                Stroke::new(
-                    1_f32,
-                    Color32::from_rgba_unmultiplied(100, 115, 130, (alpha * 80.) as u8),
-                ),
-                StrokeKind::Inside,
-            );
+            painter.rect_stroke(card, 6, border, StrokeKind::Inside);
             continue;
         }
         if let Some(backdrop) = &photo.backdrop {
@@ -263,17 +295,13 @@ fn paint_scene(
                 Color32::from_rgba_unmultiplied(80, 80, 80, (alpha * 140.) as u8),
             );
         }
-        painter.rect_stroke(
-            card,
-            12,
-            Stroke::new(
-                1_f32,
-                Color32::from_rgba_unmultiplied(100, 115, 130, (alpha * 80.) as u8),
-            ),
-            StrokeKind::Inside,
-        );
-        let foreground = rect(p.foreground, origin);
+        painter.rect_stroke(card, 6, border, StrokeKind::Inside);
+        let foreground = rect(p.foreground, shift);
         painter.image(photo.texture.id(), foreground, full, tint);
+        strip_paint::card_chrome(painter, card, palette, order, alpha);
+        if let Some(place) = hud.place(&photo.name) {
+            strip_paint::place_chip(painter, card, palette, place, now, alpha);
+        }
         draws += 1;
     }
     draws
@@ -351,6 +379,7 @@ fn live_badge(painter: &egui::Painter, card: egui::Rect, now: f64) {
 struct Feeds {
     camera: Option<CameraSlot>,
     hand: Option<hand_overlay::Slot>,
+    atlas: Option<(atlas::AtlasSlot, SyncSender<Vec<String>>)>,
 }
 struct App {
     config: Config,
@@ -384,6 +413,7 @@ struct App {
     navigation_last_action: Option<&'static str>,
     navigation_last_result: &'static str,
     navigation_notice: Option<(&'static str, f64)>,
+    hud: Hud,
 }
 impl App {
     fn new(
@@ -434,6 +464,9 @@ impl App {
             navigation_last_action: None,
             navigation_last_result: "idle",
             navigation_notice: None,
+            hud: feeds
+                .atlas
+                .map_or_else(Hud::default, |(slot, names)| Hud::new(Some(slot), Some(names))),
         }
     }
     /// Whether the layout must reserve space for the floating corner preview.
@@ -722,14 +755,24 @@ impl eframe::App for App {
         let mut draws = 0;
         let mut camera_drawn = false;
         let mut size = [0., 0.];
+        let unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0.0, |d| d.as_secs_f64());
+        self.hud.receive(ctx, now);
+        let (palette, sun) = self.hud.palette(now, unix, self.config.lat, self.config.lon);
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(Color32::from_rgb(13, 17, 23)))
+            .frame(egui::Frame::NONE.fill(strip_paint::color(palette.bg)))
             .show(ctx, |ui| {
                 let canvas = ui.max_rect();
-                let origin = canvas.min;
                 size = [canvas.width(), canvas.height()];
-                self.receive(ctx, size, now);
+                // With the strip, the collage lives in a virtual viewport drawn shifted.
+                let split = self.config.strip.then(|| strip::split(size[0], size[1]));
+                let (scene_size, origin) = split.map_or((size, canvas.min), |s| {
+                    (s.virtual_viewport, canvas.min + Vec2::new(s.offset[0], s.offset[1]))
+                });
+                self.receive(ctx, scene_size, now);
                 let painter = ui.painter_at(canvas);
+                strip_paint::backdrop(&painter, canvas, &palette, now);
                 let alpha = self.timeline.alpha(now);
                 let live_target = self.config.live_tile.then(|| {
                     self.current
@@ -740,15 +783,18 @@ impl eframe::App for App {
                 let live_skip =
                     live_target.and_then(|p| self.camera_texture.is_some().then_some(p.index));
                 if let Some(previous) = &self.previous {
-                    draws += paint_scene(&painter, previous, origin, 1. - alpha, None);
+                    draws += paint_scene(&painter, previous, origin, 1. - alpha, None, &palette, None, &self.hud);
                 }
                 if let Some(current) = &self.current {
                     draws += paint_scene(
                         &painter,
                         current,
                         origin,
-                        if self.previous.is_some() { alpha } else { 1. },
+                        1.,
                         live_skip,
+                        &palette,
+                        Some((&self.timeline, now)),
+                        &self.hud,
                     );
                 } else {
                     painter.text(
@@ -762,9 +808,30 @@ impl eframe::App for App {
                             "Loading photos..."
                         },
                         FontId::proportional(28.),
-                        Color32::from_rgb(160, 174, 189),
+                        strip_paint::color(palette.dim),
                     );
                 }
+                if let Some(split) = &split {
+                    let names: Vec<String> = self
+                        .current
+                        .as_ref()
+                        .map(|c| c.photos.iter().map(|p| p.name.clone()).collect())
+                        .unwrap_or_default();
+                    self.hud.scene(&names);
+                    let photos = self.current.as_ref().map_or(0, |c| c.layout.placements.len());
+                    self.hud.paint(
+                        &painter,
+                        canvas.min,
+                        split,
+                        &palette,
+                        sun,
+                        now,
+                        (self.config.lat, self.config.lon),
+                        self.counts.scene_id,
+                        photos,
+                    );
+                }
+                if !self.config.strip {
                 painter.text(
                     origin + Vec2::new(28., 16.),
                     Align2::LEFT_TOP,
@@ -815,6 +882,7 @@ impl eframe::App for App {
                     FontId::proportional(13.),
                     Color32::from_rgb(132, 151, 167),
                 );
+                }
                 if self.config.camera {
                     if self.config.live_tile {
                         if let (Some(placement), Some(texture)) =
@@ -827,7 +895,7 @@ impl eframe::App for App {
                                     card.shrink(8.0),
                                     size.x / size.y.max(1.0),
                                 );
-                                painter.rect_filled(card, 12, Color32::from_rgb(7, 9, 13));
+                                painter.rect_filled(card, 6, strip_paint::color(palette.bg));
                                 painter.with_clip_rect(card.shrink(2.)).image(
                                     texture.id(),
                                     target,
@@ -836,9 +904,15 @@ impl eframe::App for App {
                                 );
                                 painter.rect_stroke(
                                     card,
-                                    12,
-                                    Stroke::new(2_f32, Color32::from_rgb(85, 106, 124)),
+                                    6,
+                                    Stroke::new(1_f32, strip_paint::alpha(palette.border, 0.7)),
                                     StrokeKind::Inside,
+                                );
+                                strip_paint::brackets(
+                                    &painter,
+                                    card.expand(3.0),
+                                    14.0,
+                                    Stroke::new(1.5, strip_paint::color(palette.accent)),
                                 );
                                 live_badge(&painter, target, now);
                                 camera_drawn = true;
@@ -901,6 +975,11 @@ impl eframe::App for App {
             });
         if let Ok(mut s) = self.state.lock() {
             s.gesture_navigation_enabled = self.config.gesture_controls;
+            s.strip_enabled = self.config.strip;
+            s.theme_phase = self.hud.phase;
+            s.theme_mood = self.hud.mood.map_or("none", |m| m.name());
+            s.atlas_state = self.hud.state;
+            s.strip_view = self.hud.view;
             s.navigation_pending = self.pending_navigation.is_some();
             s.navigation_requests = self.action_gate.accepted;
             s.navigation_dispatched = self.navigation_dispatched;
@@ -992,7 +1071,8 @@ impl eframe::App for App {
             s.camera_texture_count = usize::from(self.camera_texture.is_some());
             s.camera_age_seconds = self.camera_captured.map(|t| t.elapsed().as_secs_f64());
         }
-        let repaint = if self.previous.is_some() || self.config.gestures {
+        // The strip animates continuously (scanline, radar loop, globe).
+        let repaint = if self.previous.is_some() || self.config.gestures || self.config.strip {
             Duration::from_millis(33)
         } else {
             Duration::from_secs(1)
@@ -1050,9 +1130,18 @@ fn run(config: Config) -> Result<(), &'static str> {
     } else {
         None
     };
+    let atlas_feed = if config.strip {
+        let (slot, names, handle) = atlas::start(atlas::ATLAS_PORT, stop.clone(), camera_wake.clone())
+            .map_err(|_| "atlas_worker_failed")?;
+        runtime.handles.push(handle);
+        Some((slot, names))
+    } else {
+        None
+    };
     let feeds = Feeds {
         camera: camera_slot,
         hand: hand_slot,
+        atlas: atlas_feed,
     };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -1131,6 +1220,7 @@ mod tests {
             navigation_last_action: None,
             navigation_last_result: "idle",
             navigation_notice: None,
+            hud: Hud::default(),
         };
         (app, results, commands)
     }
@@ -1140,6 +1230,7 @@ mod tests {
                 image: egui::ColorImage::new([20, 20], vec![Color32::WHITE; 400]),
                 backdrop: Some(egui::ColorImage::new([2, 2], vec![Color32::GRAY; 4])),
                 aspect: 1.,
+                name: String::new(),
             })
             .collect();
         let layout = layout::choose(&vec![1.; count], 1920., 1080., None, "").unwrap();

@@ -12,6 +12,8 @@ pub struct DecodedPhoto {
     pub image: ColorImage,
     pub backdrop: Option<ColorImage>,
     pub aspect: f32,
+    /// Source basename, filled in by the photo source.
+    pub name: String,
 }
 fn color(image: &image::DynamicImage) -> ColorImage {
     let rgba = image.to_rgba8();
@@ -66,6 +68,7 @@ pub fn decode(bytes: &[u8], backdrop: bool, camera: bool) -> Result<DecodedPhoto
         image: color(&resized),
         backdrop: background,
         aspect,
+        name: String::new(),
     })
 }
 #[cfg(test)]

@@ -760,11 +760,18 @@ fn hand_glyph(p: &Painter, c: Pos2, scale: f32, color: Color32, alpha: u8) {
     );
 }
 pub fn install_japanese_font(ctx: &egui::Context) -> bool {
-    let path = "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf";
-    if !std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.len() <= 16 * 1024 * 1024) {
-        return false;
-    }
-    let Ok(bytes) = std::fs::read(path) else {
+    // The display ships Droid; the others let the same binary run on a dev machine.
+    const PATHS: [&str; 3] = [
+        "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/System/Library/Fonts/ヒラギノ角ゴシック W4.ttc",
+    ];
+    let Some(bytes) = PATHS.iter().find_map(|path| {
+        std::fs::metadata(path)
+            .is_ok_and(|m| m.is_file() && m.len() <= 32 * 1024 * 1024)
+            .then(|| std::fs::read(path).ok())
+            .flatten()
+    }) else {
         return false;
     };
     let mut fonts = egui::FontDefinitions::default();
@@ -775,6 +782,11 @@ pub fn install_japanese_font(ctx: &egui::Context) -> bool {
     fonts
         .families
         .entry(egui::FontFamily::Proportional)
+        .or_default()
+        .push("local-japanese".into());
+    fonts
+        .families
+        .entry(egui::FontFamily::Monospace)
         .or_default()
         .push("local-japanese".into());
     ctx.set_fonts(fonts);

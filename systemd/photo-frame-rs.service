@@ -1,7 +1,7 @@
 [Unit]
 Description=Native Rust photo frame for the 2F office display
-After=network-online.target
-Wants=network-online.target
+After=network-online.target atlas.service
+Wants=network-online.target atlas.service
 StartLimitIntervalSec=0
 
 [Service]
@@ -25,7 +25,7 @@ ExecStartPre=/usr/bin/timeout 120 /bin/sh -c "until [ -S /tmp/.X11-unix/X1 ]; do
 # Fullscreen is requested once at startup; without a window manager the request
 # is dropped and the window stays small.
 ExecStartPre=/usr/bin/timeout 60 /bin/sh -c "until xprop -root _NET_SUPPORTING_WM_CHECK >/dev/null 2>&1; do sleep 0.5; done"
-ExecStart=@APP_ROOT@/current/bin/photo-frame-rs --fullscreen --scale 2 --live-tile --camera-port 8094 --status-port 8096
+ExecStart=@APP_ROOT@/current/bin/photo-frame-rs --fullscreen --scale 2 --live-tile --camera-port 8094 --status-port 8096 --lat @ATLAS_LAT@ --lon @ATLAS_LON@
 Restart=always
 RestartSec=3
 CPUQuota=120%

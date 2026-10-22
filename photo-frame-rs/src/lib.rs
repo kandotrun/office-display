@@ -2,6 +2,7 @@
 
 pub mod atlas;
 pub mod decode;
+pub mod depth;
 pub mod globe;
 pub mod hand_diagnostics;
 pub mod hand_overlay;
@@ -11,6 +12,7 @@ pub mod layout;
 pub mod mjpeg;
 pub mod navigation;
 pub mod playlist;
+pub mod space;
 pub mod status;
 pub mod strip;
 pub mod strip_paint;

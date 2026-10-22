@@ -1,8 +1,9 @@
 //! Painting for the info strip and the HUD chrome. Geometry and timing come
 //! from `strip`, `globe` and `theme`; this module only draws.
 use crate::{
-    atlas,
+    atlas, depth,
     globe,
+    space::{self, Camera, v3},
     strip::{self, Blocks, View, ViewFrame},
     theme::{Mood, Palette, Rgb, Sun},
 };
@@ -330,16 +331,7 @@ fn paint_card(painter: &egui::Painter, rect: Rect, palette: &Palette, now: f64, 
     }
     let zoom = 1.04 - 0.04 * ease(blend);
     paint_layer(&clip, rect, palette, now, k, &card.current, blend.max(0.001), zoom, elapsed);
-    // Grid and scanline over everything.
-    let grid = alpha(palette.border, 0.10);
-    for i in 1..8 {
-        let x = rect.left() + rect.width() * i as f32 / 8.0;
-        clip.line_segment([Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())], Stroke::new(1.0, grid));
-    }
-    for i in 1..6 {
-        let y = rect.top() + rect.height() * i as f32 / 6.0;
-        clip.line_segment([Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)], Stroke::new(1.0, grid));
-    }
+    // Scanline over everything, like glass in front of the table.
     let sweep = ((now / 4.0) % 1.0) as f32;
     let sy = rect.top() + sweep * rect.height();
     for i in 0..16 {
@@ -397,9 +389,6 @@ fn paint_card(painter: &egui::Painter, rect: Rect, palette: &Palette, now: f64, 
 fn ease(t: f32) -> f32 {
     1.0 - (1.0 - t.clamp(0.0, 1.0)).powi(3)
 }
-fn zoomed(rect: Rect, zoom: f32) -> Rect {
-    Rect::from_center_size(rect.center(), rect.size() * zoom)
-}
 
 #[allow(clippy::too_many_arguments)]
 fn paint_layer(
@@ -413,8 +402,6 @@ fn paint_layer(
     zoom: f32,
     elapsed: f64,
 ) {
-    let full = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
-    let target = zoomed(rect, zoom);
     let tint = |rgb: Rgb, a: f32| {
         // Neutral grey basemaps pick up the palette: lift toward the accent.
         let m = |c: u8, t: u8| ((c as f32 * 0.55 + t as f32 * 0.45) * a) as u8;
@@ -450,26 +437,126 @@ fn paint_layer(
             );
         }
         MapCard::Map(m) => {
-            painter.image(m.base.id(), target, full, tint(palette.accent, opacity));
-            if let Some(f) = strip::radar_frame(elapsed, m.radar.len(), m.now_index) {
-                painter.image(m.radar[f.index].id(), target, full, Color32::from_white_alpha((opacity * (1.0 - f.blend) * 255.0) as u8));
-                if f.blend > 0.0 {
-                    painter.image(m.radar[f.next].id(), target, full, Color32::from_white_alpha((opacity * f.blend * 255.0) as u8));
-                }
+            let frame = strip::radar_frame(elapsed, m.radar.len(), m.now_index);
+            let radar = frame.map(|f| (&m.radar[f.index], &m.radar[f.next], f.blend));
+            let table = Table { base: m.base, radar, focus: m.office, tint: tint(palette.accent, opacity) };
+            let top = tilted_map(painter, rect, palette, now, k, &table, opacity, zoom, elapsed);
+            if let Some(f) = frame {
                 radar_timeline(painter, rect, palette, k, m, f, opacity);
             } else {
                 painter.text(rect.center_bottom() - Vec2::new(0.0, 14.0 * k), Align2::CENTER_BOTTOM, "雨雲データなし", prop(13.0 * k), alpha(palette.dim, opacity));
             }
-            let at = target.min + target.size() * Vec2::new(m.office[0], m.office[1]);
-            marker(painter, rect, at, palette, now, k, opacity, "OFFICE", m.office_coords);
+            if let Some(top) = top {
+                tag(painter, top, palette, k, opacity, "OFFICE", m.office_coords);
+            }
         }
         MapCard::Place(p) => {
-            painter.image(p.map.id(), target, full, tint(palette.accent, opacity));
-            let at = target.center();
-            marker(painter, rect, at, palette, now, k, opacity, p.place, p.coords);
+            let table = Table { base: p.map, radar: None, focus: [0.5, 0.5], tint: tint(palette.accent, opacity) };
+            if let Some(top) = tilted_map(painter, rect, palette, now, k, &table, opacity, zoom, elapsed) {
+                tag(painter, top, palette, k, opacity, p.place, p.coords);
+            }
         }
         MapCard::Globe(g) => paint_globe(painter, rect, palette, now, k, g, opacity, zoom),
     }
+}
+
+struct Table<'a> {
+    base: &'a TextureHandle,
+    radar: Option<(&'a TextureHandle, &'a TextureHandle, f32)>,
+    /// Point of interest in normalised image coordinates; the camera orbits it.
+    focus: [f32; 2],
+    tint: Color32,
+}
+/// The map as a tilted, slowly orbiting tactical table with a light beam rising
+/// from the point of interest. Returns the screen position of the beam top.
+#[allow(clippy::too_many_arguments)]
+fn tilted_map(
+    painter: &egui::Painter,
+    rect: Rect,
+    palette: &Palette,
+    now: f64,
+    k: f32,
+    t: &Table<'_>,
+    opacity: f32,
+    zoom: f32,
+    elapsed: f64,
+) -> Option<Pos2> {
+    let w = rect.width() * 1.9 * zoom;
+    let h = w * 0.75;
+    let focus = v3(rect.center().x, rect.center().y + rect.height() * 0.08, 0.0);
+    let flat = space::rect_corners(focus.x - t.focus[0] * w, focus.y - t.focus[1] * h, w, h);
+    // Settle from flat to tilted when the view arrives, then orbit.
+    let arrive = space::ease_out((elapsed / 1.6) as f32);
+    let yaw = 0.42 * (now as f32 * 0.11).sin() + 0.25 * (1.0 - arrive);
+    let pitch = 0.18 + 0.72 * arrive + 0.05 * (now as f32 * 0.23).sin();
+    let corners = flat.map(|p| p.turn(focus, yaw, pitch));
+    let cam = Camera::new([focus.x, focus.y], rect.width() * 1.25);
+    let on = |u: f32, v: f32, lift: f32| {
+        let flat_p = space::on_quad(&flat, u, v).add(v3(0.0, 0.0, -lift));
+        flat_p.turn(focus, yaw, pitch)
+    };
+    depth::textured(painter, &cam, &corners, t.base.id(), [[0.0, 0.0], [1.0, 1.0]], t.tint, 16);
+    if let Some((a, b, blend)) = t.radar {
+        let full = [[0.0, 0.0], [1.0, 1.0]];
+        depth::textured(painter, &cam, &corners, a.id(), full, Color32::from_white_alpha((opacity * (1.0 - blend) * 255.0) as u8), 16);
+        if blend > 0.0 {
+            depth::textured(painter, &cam, &corners, b.id(), full, Color32::from_white_alpha((opacity * blend * 255.0) as u8), 16);
+        }
+    }
+    // Table grid and a scan line sweeping across it.
+    let grid = Stroke::new(1.0, alpha(palette.accent, 0.13 * opacity));
+    for i in 0..=12 {
+        let f = i as f32 / 12.0;
+        depth::segment(painter, &cam, on(f, 0.0, 0.0), on(f, 1.0, 0.0), grid);
+        depth::segment(painter, &cam, on(0.0, f, 0.0), on(1.0, f, 0.0), grid);
+    }
+    let sv = ((now / 5.0) % 1.0) as f32;
+    for i in 0..10 {
+        let v = sv - i as f32 * 0.006;
+        if v > 0.0 {
+            let a = 0.6 * (1.0 - i as f32 / 10.0).powi(2) * opacity;
+            depth::segment(painter, &cam, on(0.0, v, 0.0), on(1.0, v, 0.0), Stroke::new(2.0, alpha(palette.accent, a)));
+        }
+    }
+    // Rings expanding on the table around the focus.
+    let (fu, fv) = (t.focus[0], t.focus[1]);
+    for ring in 0..3 {
+        let ph = ((now * 0.55 + ring as f64 / 3.0) % 1.0) as f32;
+        let radius = 0.01 + ph * 0.09;
+        let pts: Vec<Pos2> = (0..=48)
+            .filter_map(|i| {
+                let a = i as f32 / 48.0 * std::f32::consts::TAU;
+                depth::project(&cam, on(fu + radius * a.cos(), fv + radius * a.sin() * 4.0 / 3.0, 0.0))
+            })
+            .collect();
+        painter.add(Shape::line(pts, Stroke::new(1.5, alpha(palette.accent, (1.0 - ph) * 0.9 * opacity))));
+    }
+    // The beam: a column of light rising off the table.
+    let height = rect.height() * (0.45 + 0.05 * (now as f32 * 1.7).sin());
+    let steps = 14;
+    for i in 0..steps {
+        let (h0, h1) = (height * i as f32 / steps as f32, height * (i + 1) as f32 / steps as f32);
+        let a = opacity * (1.0 - i as f32 / steps as f32);
+        depth::segment(painter, &cam, on(fu, fv, h0), on(fu, fv, h1), Stroke::new(6.0 * k, alpha(palette.accent, 0.18 * a)));
+        depth::segment(painter, &cam, on(fu, fv, h0), on(fu, fv, h1), Stroke::new(1.6, alpha(palette.text, 0.85 * a)));
+    }
+    if let Some(base) = depth::project(&cam, on(fu, fv, 0.0)) {
+        painter.circle_filled(base, 4.0 * k, alpha(palette.accent, opacity));
+    }
+    // Distance fog toward the far edge so the table fades into the dark.
+    for i in 0..10 {
+        let y = rect.top() + rect.height() * 0.035 * i as f32;
+        let band = Rect::from_min_size(Pos2::new(rect.left(), y), Vec2::new(rect.width(), rect.height() * 0.035 + 1.0));
+        painter.rect_filled(band, 0, alpha(palette.bg, 0.85 * (1.0 - i as f32 / 10.0)));
+    }
+    depth::project(&cam, on(fu, fv, height))
+}
+/// Label hanging off a beam top or marker.
+fn tag(painter: &egui::Painter, at: Pos2, palette: &Palette, k: f32, opacity: f32, name: &str, coords_: (f64, f64)) {
+    let box_ = at + Vec2::new(10.0, -6.0) * k;
+    painter.line_segment([at, box_], Stroke::new(1.0, alpha(palette.accent, 0.7 * opacity)));
+    painter.text(box_, Align2::LEFT_BOTTOM, name, prop(13.0 * k), alpha(palette.text, opacity));
+    painter.text(box_ + Vec2::new(0.0, 2.0 * k), Align2::LEFT_TOP, coords(coords_.0, coords_.1), mono(10.0 * k), alpha(palette.dim, opacity));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -586,6 +673,35 @@ fn paint_globe(painter: &egui::Painter, rect: Rect, palette: &Palette, now: f64,
         .map(|i| c + Vec2::angled(-spin * 2.0 + i as f32 / 40.0 * 1.2) * (ring - 4.0 * k))
         .collect();
     painter.add(Shape::line(arc, Stroke::new(2.0, alpha(palette.accent, 0.8 * opacity))));
+    // Satellite orbits: tilted rings, hidden where the globe covers them.
+    for (i, (incl, speed, rr)) in [(0.45_f32, 0.35_f64, 1.28_f32), (-0.95, -0.24, 1.44), (1.3, 0.5, 1.18)]
+        .into_iter()
+        .enumerate()
+    {
+        let node = now as f32 * 0.04 * (i as f32 + 1.0);
+        let at = |theta: f32| v3(theta.cos() * rr, 0.0, theta.sin() * rr).pitch(incl).yaw(node);
+        let visible = |p: space::V3| p.z <= 0.0 || p.x * p.x + p.y * p.y > 1.0;
+        let n = 120;
+        for j in 0..n {
+            let (a, b) = (at(j as f32 / n as f32 * std::f32::consts::TAU), at((j + 1) as f32 / n as f32 * std::f32::consts::TAU));
+            if !visible(a) || !visible(b) {
+                continue;
+            }
+            let front = if a.z <= 0.0 { 0.5 } else { 0.14 };
+            painter.line_segment(
+                [Pos2::new(c.x + a.x * radius, c.y + a.y * radius), Pos2::new(c.x + b.x * radius, c.y + b.y * radius)],
+                Stroke::new(1.0, alpha(palette.accent, front * opacity)),
+            );
+        }
+        for trail in 0..8 {
+            let theta = (now * speed) as f32 + i as f32 * 2.1 - trail as f32 * 0.035 * speed.signum() as f32;
+            let p = at(theta);
+            if visible(p) {
+                let a = opacity * (1.0 - trail as f32 / 8.0);
+                painter.circle_filled(Pos2::new(c.x + p.x * radius, c.y + p.y * radius), (3.0 - trail as f32 * 0.3) * k, alpha(palette.text, a));
+            }
+        }
+    }
     // Office and optional far photo place.
     if let Some(p) = globe::project(g.view.0, g.view.1, g.office.0, g.office.1) {
         let at = to_screen(p);
@@ -718,11 +834,8 @@ fn paint_rain(painter: &egui::Painter, rect: Rect, palette: &Palette, now: f64, 
     }
 }
 
-/// HUD frame around a collage card: corner ticks and a small index tag.
-pub fn card_chrome(painter: &egui::Painter, card: Rect, palette: &Palette, index: usize, opacity: f32) {
-    // Brackets close in on the card as it arrives, like a target lock.
-    let lock = 3.0 + 22.0 * (1.0 - ease(opacity));
-    brackets(painter, card.expand(lock), 14.0, Stroke::new(1.5, alpha(palette.accent, 0.75 * opacity)));
+/// Small index tag on a collage card (its screen bounding box).
+pub fn card_label(painter: &egui::Painter, card: Rect, palette: &Palette, index: usize, opacity: f32) {
     painter.text(
         card.left_top() + Vec2::new(10.0, 8.0),
         Align2::LEFT_TOP,

@@ -119,8 +119,15 @@ fn parse_headers(bytes: &[u8]) -> Result<Vec<(String, String)>, &'static str> {
     let mut lines = text.split("\r\n");
     let status = lines.next().ok_or("missing_status")?;
     let mut parts = status.split_whitespace();
-    if !matches!(parts.next(), Some("HTTP/1.0" | "HTTP/1.1")) || parts.next() != Some("200") {
+    if !matches!(parts.next(), Some("HTTP/1.0" | "HTTP/1.1")) {
         return Err("http_not_200");
+    }
+    match parts.next() {
+        Some("200") => {}
+        // Definite answers a caller may want to remember, unlike 5xx.
+        Some("404") => return Err("http_not_found"),
+        Some("400") => return Err("http_bad_request"),
+        _ => return Err("http_not_200"),
     }
     let mut headers = Vec::new();
     for line in lines {
@@ -187,6 +194,13 @@ pub fn require_type(response: &Response, allowed: &[&str]) -> Result<(), &'stati
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn definite_status_codes_are_named() {
+        assert_eq!(parse_headers(b"HTTP/1.1 404 Not Found").err(), Some("http_not_found"));
+        assert_eq!(parse_headers(b"HTTP/1.0 400 Bad Request").err(), Some("http_bad_request"));
+        assert_eq!(parse_headers(b"HTTP/1.0 503 Service Unavailable").err(), Some("http_not_200"));
+        assert!(parse_headers(b"HTTP/1.1 200 OK\r\nContent-Type: image/png").is_ok());
+    }
     #[test]
     fn rejects_redirect_chunked_truncation_and_limits() {
         for bytes in [

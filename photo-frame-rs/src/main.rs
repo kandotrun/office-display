@@ -64,10 +64,28 @@ impl Default for Config {
     }
 }
 fn config() -> Result<Option<Config>, &'static str> {
-    config_from(std::env::args().skip(1))
+    let env = |k: &str| std::env::var(k).ok();
+    config_with(env("ATLAS_LAT"), env("ATLAS_LON"), std::env::args().skip(1))
 }
+#[cfg(test)]
 fn config_from(args: impl IntoIterator<Item = String>) -> Result<Option<Config>, &'static str> {
+    config_with(None, None, args)
+}
+/// The office position may come from `ATLAS_LAT`/`ATLAS_LON` (the same
+/// variables atlas reads), so the unit file needs no flags an older release
+/// would reject; `--lat`/`--lon` still win.
+fn config_with(
+    lat: Option<String>,
+    lon: Option<String>,
+    args: impl IntoIterator<Item = String>,
+) -> Result<Option<Config>, &'static str> {
     let mut c = Config::default();
+    if let Some(v) = lat {
+        c.lat = v.parse::<f64>().ok().filter(|v| (-90.0..=90.0).contains(v)).ok_or("invalid_lat")?;
+    }
+    if let Some(v) = lon {
+        c.lon = v.parse::<f64>().ok().filter(|v| (-180.0..=180.0).contains(v)).ok_or("invalid_lon")?;
+    }
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -790,19 +808,23 @@ impl eframe::App for App {
         let mut draws = 0;
         let mut camera_drawn = false;
         let mut size = [0., 0.];
+        // The collage's own viewport: virtual with the strip, the canvas without.
+        let mut scene_size = [0., 0.];
         let unix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0.0, |d| d.as_secs_f64());
         self.hud.receive(ctx, now);
         let (palette, sun) = self.hud.palette(now, unix, self.config.lat, self.config.lon);
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(strip_paint::color(palette.sky_bottom)))
+            // No fill: the sky gradient covers the whole canvas.
+            .frame(egui::Frame::NONE)
             .show(ctx, |ui| {
                 let canvas = ui.max_rect();
                 size = [canvas.width(), canvas.height()];
                 // With the strip, the collage lives in a virtual viewport drawn shifted.
                 let split = self.config.strip.then(|| strip::split(size[0], size[1]));
-                let (scene_size, origin) = split.map_or((size, canvas.min), |s| {
+                let origin;
+                (scene_size, origin) = split.map_or((size, canvas.min), |s| {
                     (s.virtual_viewport, canvas.min + Vec2::new(s.offset[0], s.offset[1]))
                 });
                 self.receive(ctx, scene_size, now);
@@ -892,7 +914,7 @@ impl eframe::App for App {
                         .as_ref()
                         .map(|c| c.photos.iter().map(|p| p.name.clone()).collect())
                         .unwrap_or_default();
-                    self.hud.scene(&names);
+                    self.hud.scene(&names, now);
                     self.hud.paint(
                         &painter,
                         canvas.min,
@@ -996,7 +1018,8 @@ impl eframe::App for App {
                             }
                         }
                     } else {
-                        let box_ = layout::camera_rect(size[0], size[1]);
+                        // Same rect the layout reserved, in the collage's coordinates.
+                        let box_ = layout::camera_rect(scene_size[0], scene_size[1]);
                         let panel = rect(box_, origin);
                         painter.rect_filled(panel, 8, Color32::from_rgb(10, 14, 19));
                         if let Some(texture) = &self.camera_texture {
@@ -1097,7 +1120,7 @@ impl eframe::App for App {
                         scene.layout.placements.iter().any(|p| {
                             layout::intersects(
                                 p.foreground,
-                                layout::camera_rect(size[0], size[1]).inset(-10.0),
+                                layout::camera_rect(scene_size[0], scene_size[1]).inset(-10.0),
                             )
                         })
                     });
@@ -1148,12 +1171,8 @@ impl eframe::App for App {
             s.camera_texture_count = usize::from(self.camera_texture.is_some());
             s.camera_age_seconds = self.camera_captured.map(|t| t.elapsed().as_secs_f64());
         }
-        // The strip animates continuously (scanline, radar loop, globe).
-        let repaint = if self.previous.is_some() || self.config.gestures || self.config.strip {
-            Duration::from_millis(33)
-        } else {
-            Duration::from_secs(1)
-        };
+        // The sky, the sway and the strip move all the time.
+        let repaint = Duration::from_millis(33);
         let repaint = self.camera_captured.map_or(repaint, |captured| {
             repaint.min(
                 worker::CAMERA_STALE
@@ -1500,6 +1519,14 @@ mod tests {
         assert!(!c.strip && c.lat == 35.0 && c.lon == 135.75);
         assert_eq!(args(&["--lat", "91"]).err(), Some("invalid_lat"));
         assert_eq!(args(&["--lon", "x"]).err(), Some("invalid_lon"));
+        let env = |lat: &str, lon: &str, a: &[&str]| {
+            config_with(Some(lat.into()), Some(lon.into()), a.iter().map(|s| s.to_string()))
+        };
+        let c = env("35.0", "135.75", &[]).unwrap().unwrap();
+        assert!(c.lat == 35.0 && c.lon == 135.75);
+        let c = env("35.0", "135.75", &["--lat", "34.0"]).unwrap().unwrap();
+        assert_eq!(c.lat, 34.0, "flags win over the environment");
+        assert_eq!(env("abc", "1", &[]).err(), Some("invalid_lat"));
     }
     #[test]
     fn live_tile_implies_camera_and_can_opt_out() {

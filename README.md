@@ -37,7 +37,7 @@
                     └────────────────────────────────────────────────────┘
 ```
 
-- アプリ（photo-frame-rs）は `127.0.0.1` としか話しません。外部と通信するのは `atlas` だけで、地図タイル・雨雲・天気・衛星画像を取得してループバックで配ります。
+- アプリ（photo-frame-rs）は `127.0.0.1` としか話しません。このリポジトリのサービスで外部と通信するのは `atlas` だけで、地図タイル・雨雲・天気・衛星画像を取得してループバックで配ります（写真は別管理の photo-manager が Immich から取得します）。
 - 顔検出は「何人いるか」だけを使い、身元特定・履歴保存はしません。
 - カメラ映像はメモリ上だけで扱い、ディスクに残しません。
 
@@ -92,7 +92,7 @@
 
 ## atlas
 
-地図・雨雲・天気・地球・撮影地をまとめて用意する、ループバックのサービスです（`127.0.0.1:8099`）。表示機の中で外部と通信するのはこのサービスだけです。
+地図・雨雲・天気・地球・撮影地をまとめて用意する、ループバックのサービスです（`127.0.0.1:8099`）。このリポジトリのサービスで外部と通信するのはこれだけです（写真の取得は別管理の photo-manager → Immich）。
 
 | 取得元 | 用途 | 更新 |
 |---|---|---|
@@ -248,19 +248,31 @@ GET /status  {"db":…, "bands":[…], "text":…, "partial":…, "speaking":boo
 export DISPLAY_HOST=<display-host>
 export DISPLAY_USER=<display-user>
 export APP_ROOT=/home/$DISPLAY_USER/photo-frame-rs
-# オフィスの位置と予報区は既定で広島（下表）。別の場所に置くときだけ上書きする
-# export ATLAS_LAT=... ATLAS_LON=... ATLAS_FORECAST_OFFICE=... ATLAS_FORECAST_AREA=... ATLAS_TEMP_POINT=...
 
+# Python サービス（atlas・room-survey など）とユニットを入れる。初回と、それらを変えたとき
+# オフィスの位置と予報区は既定で広島（atlas の表）。別の場所に置くときだけ上書きする
+# export ATLAS_LAT=... ATLAS_LON=... ATLAS_FORECAST_OFFICE=... ATLAS_FORECAST_AREA=... ATLAS_TEMP_POINT=...
+./deploy/install-units.sh
+
+# photo-frame-rs を入れ替える
 ./deploy/build-and-deploy.sh
 ```
 
-スクリプトは次を行います。
+`install-units.sh` は次を行います。
+
+1. `atlas/`・`survey/`・`speech/`・`stats/`・`presence/` を表示機へコピー
+2. systemd ユニットを描画して設置（`ATLAS_*` はここでユニットに入る）
+3. 有効化し、`atlas.service` は起動・再起動して新しいコードを反映
+
+`build-and-deploy.sh` は次を行います。
 
 1. `photo-frame-rs` を表示機へ `rsync`
 2. 表示機上で `cargo build --release --locked`
 3. `$APP_ROOT/releases/<version>-<date>/bin/` へ配置し、`current` を差し替え
-4. systemdユニットを（初回のみ）設置して再起動
+4. `photo-frame-rs.service` を再起動
 5. `/health` で確認
+
+オフィスの位置は、ユニットの `Environment=ATLAS_LAT/ATLAS_LON` でアプリにも渡ります（フラグではないので、古いリリースへ戻しても起動できます）。
 
 ### ロールバック
 
@@ -291,6 +303,6 @@ ssh "$DISPLAY_USER@$DISPLAY_HOST" '
 
 - **認証情報を置かない** — アプリはループバックのHTTPを読むだけで、トークンもAPIキーも持ちません。
 - **写真を同梱しない** — 画像は実行時に取得します。
-- **外へ出るのは atlas だけ** — 公開データ（地図・気象・衛星画像）を取りに行くだけで、送るのはタイル座標と丸めた撮影地の座標だけです。
+- **外へ出るのは atlas だけ**（このリポジトリの中では） — 公開データ（地図・気象・衛星画像）を取りに行くだけで、送るのはタイル座標と丸めた撮影地の座標だけです。写真名はログにもディスクにも残しません。
 - **顔は数えるだけ** — 身元特定・保存はしません。
 - **落ちても戻る** — systemd `Restart=always`、検出器異常時は明るいまま。

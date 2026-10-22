@@ -143,7 +143,8 @@ pub enum AtlasEvent {
     Status(Status),
     Map {
         view: View,
-        rev: u64,
+        /// The frames and marker these images were rendered for.
+        meta: MapView,
         base: ColorImage,
         radar: Vec<ColorImage>,
     },
@@ -200,13 +201,16 @@ fn place(port: u16, name: &str) -> Result<(Option<Place>, Option<ColorImage>), &
     let response = http::get(port, &path, MAX_PLACE_BYTES);
     let place = match response {
         Ok(r) => parse_place(&r.body)?,
-        Err("http_not_200") => return Ok((None, None)),
+        // Only a definite answer is remembered; 5xx and timeouts are retried.
+        Err("http_not_found" | "http_bad_request") => return Ok((None, None)),
         Err(e) => return Err(e),
     };
-    let map = place
-        .near
-        .then(|| image(port, &format!("{path}/map.jpg")).ok())
-        .flatten();
+    // A near place without its map is not done yet: fail so it is asked again.
+    let map = if place.near {
+        Some(image(port, &format!("{path}/map.jpg"))?)
+    } else {
+        None
+    };
     Ok((Some(place), map))
 }
 /// Polls `/status`; fetches imagery only when a view's rev changes. Scene photo
@@ -234,29 +238,16 @@ pub fn start(
             }
         };
         let mut revs: [Option<u64>; 3] = [None; 3];
-        let mut asked: VecDeque<String> = VecDeque::new();
-        let mut asked_set: HashSet<String> = HashSet::new();
         let mut next_poll = Instant::now();
         while !stop.load(Ordering::Relaxed) {
             match names_rx.try_recv() {
                 Ok(names) => {
-                    for name in names.into_iter().take(4) {
-                        if asked_set.contains(&name) {
-                            continue;
-                        }
-                        if asked.len() == 256
-                            && let Some(old) = asked.pop_front()
-                        {
-                            asked_set.remove(&old);
-                        }
-                        asked.push_back(name.clone());
-                        asked_set.insert(name.clone());
+                    // The HUD only sends names it has no usable answer for; a failed
+                    // look-up sends nothing, so the name is asked again on a later scene.
+                    let mut seen = HashSet::new();
+                    for name in names.into_iter().filter(|n| seen.insert(n.clone())).take(4) {
                         if let Ok((place, map)) = place(port, &name) {
                             push(AtlasEvent::Place { name, place, map });
-                        } else {
-                            // Retry on a later scene.
-                            asked_set.remove(&name);
-                            asked.retain(|n| *n != name);
                         }
                     }
                     continue;
@@ -287,7 +278,7 @@ pub fn start(
                             revs[i] = Some(v.rev);
                             push(AtlasEvent::Map {
                                 view,
-                                rev: v.rev,
+                                meta: v,
                                 base,
                                 radar,
                             });

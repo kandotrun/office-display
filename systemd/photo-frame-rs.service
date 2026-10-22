@@ -19,13 +19,17 @@ Environment=XDG_CONFIG_HOME=/run/photo-frame-rs/config
 Environment=XDG_CACHE_HOME=/run/photo-frame-rs/cache
 Environment=TMPDIR=/run/photo-frame-rs/tmp
 Environment=MESA_SHADER_CACHE_DISABLE=true
+# Office position for the sky and the map marker (also read by atlas). An
+# environment variable, not a flag, so rolling back to an older release works.
+Environment=ATLAS_LAT=@ATLAS_LAT@
+Environment=ATLAS_LON=@ATLAS_LON@
 ExecStartPre=/usr/bin/install -d -m 0700 /run/photo-frame-rs/tmp /run/photo-frame-rs/cache /run/photo-frame-rs/config
 # X is started by the tty1 autologin session, outside systemd target ordering.
 ExecStartPre=/usr/bin/timeout 120 /bin/sh -c "until [ -S /tmp/.X11-unix/X1 ]; do sleep 0.5; done"
 # Fullscreen is requested once at startup; without a window manager the request
 # is dropped and the window stays small.
 ExecStartPre=/usr/bin/timeout 60 /bin/sh -c "until xprop -root _NET_SUPPORTING_WM_CHECK >/dev/null 2>&1; do sleep 0.5; done"
-ExecStart=@APP_ROOT@/current/bin/photo-frame-rs --fullscreen --scale 2 --live-tile --camera-port 8094 --status-port 8096 --lat @ATLAS_LAT@ --lon @ATLAS_LON@
+ExecStart=@APP_ROOT@/current/bin/photo-frame-rs --fullscreen --scale 2 --live-tile --camera-port 8094 --status-port 8096
 Restart=always
 RestartSec=3
 CPUQuota=120%

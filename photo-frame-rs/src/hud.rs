@@ -13,7 +13,8 @@ use std::{
 };
 
 pub struct MapTex {
-    pub rev: u64,
+    /// Frames and marker the textures were rendered for (not the latest status).
+    pub meta: atlas::MapView,
     pub base: TextureHandle,
     pub radar: Vec<TextureHandle>,
 }
@@ -22,6 +23,13 @@ pub struct PlaceEntry {
     pub map: Option<TextureHandle>,
 }
 const PLACE_LIMIT: usize = 128;
+/// Place maps are 1024x768 RGBA (3 MiB); only this many stay on the GPU. A
+/// dropped map is fetched again the next time its photo is on show.
+const PLACE_MAPS: usize = 8;
+/// Weather and rain older than this are no longer shown as current.
+const STATUS_STALE_SECONDS: f64 = 1800.0;
+/// Missing places are asked for again after this long.
+const PLACE_RETRY_SECONDS: f64 = 30.0;
 
 pub struct Hud {
     slot: Option<AtlasSlot>,
@@ -33,6 +41,10 @@ pub struct Hud {
     places: HashMap<String, PlaceEntry>,
     place_order: VecDeque<String>,
     sent: Vec<String>,
+    sent_at: f64,
+    /// Photo names of the scene on screen.
+    shown: Vec<String>,
+    status_at: f64,
     cycle: strip::Cycle,
     eased: Option<Eased>,
     rain_series: Vec<u8>,
@@ -58,6 +70,9 @@ impl Hud {
             places: HashMap::new(),
             place_order: VecDeque::new(),
             sent: Vec::new(),
+            sent_at: f64::NEG_INFINITY,
+            shown: Vec::new(),
+            status_at: f64::NEG_INFINITY,
             cycle: strip::Cycle::default(),
             eased: None,
             rain_series: Vec::new(),
@@ -90,11 +105,12 @@ impl Hud {
                         "partial"
                     };
                     self.status = Some(status);
+                    self.status_at = now;
                 }
-                AtlasEvent::Map { view, rev, base, radar } => {
+                AtlasEvent::Map { view, meta, base, radar } => {
                     let i = usize::from(view == View::Local);
                     self.maps[i] = Some(MapTex {
-                        rev,
+                        meta,
                         base: load("atlas-base", base),
                         radar: radar.into_iter().map(|r| load("atlas-radar", r)).collect(),
                     });
@@ -103,6 +119,7 @@ impl Hud {
                     self.globe = Some((load("globe-day", day), load("globe-night", night)));
                 }
                 AtlasEvent::Place { name, place, map } => {
+                    self.place_order.retain(|n| *n != name);
                     if self.place_order.len() == PLACE_LIMIT
                         && let Some(old) = self.place_order.pop_front()
                     {
@@ -111,19 +128,57 @@ impl Hud {
                     self.place_order.push_back(name.clone());
                     let map = map.map(|m| load("place-map", m));
                     self.places.insert(name, PlaceEntry { place, map });
+                    self.trim_place_maps();
                 }
                 AtlasEvent::Unavailable(_) => self.state = "unavailable",
             }
         }
+        // Old weather must not pass for current; the maps themselves stay.
+        if now - self.status_at > STATUS_STALE_SECONDS
+            && let Some(s) = self.status.as_mut()
+        {
+            s.weather = None;
+            s.rain = None;
+            self.state = "unavailable";
+        }
     }
-    /// Ask atlas about the photos in a new scene (once per distinct scene).
-    pub fn scene(&mut self, names: &[String]) {
-        if names == self.sent.as_slice() {
+    fn trim_place_maps(&mut self) {
+        let mut with_map = self.place_order.iter().filter(|n| self.places.get(*n).is_some_and(|e| e.map.is_some())).count();
+        for name in &self.place_order {
+            if with_map <= PLACE_MAPS {
+                break;
+            }
+            if let Some(e) = self.places.get_mut(name)
+                && e.map.take().is_some()
+            {
+                with_map -= 1;
+            }
+        }
+    }
+    /// Scene photos without a usable answer yet: never asked, or near with no map.
+    fn missing(&self, names: &[String]) -> Vec<String> {
+        names
+            .iter()
+            .filter(|n| match self.places.get(*n) {
+                None => true,
+                Some(e) => e.place.as_ref().is_some_and(|p| p.near) && e.map.is_none(),
+            })
+            .cloned()
+            .collect()
+    }
+    /// Ask atlas about scene photos it has not answered for: at once for a new
+    /// set, and again every `PLACE_RETRY_SECONDS` while answers are missing.
+    pub fn scene(&mut self, names: &[String], now: f64) {
+        let missing = self.missing(names);
+        self.shown = names.to_vec();
+        if missing.is_empty() || (missing == self.sent && now - self.sent_at < PLACE_RETRY_SECONDS) {
             return;
         }
-        self.sent = names.to_vec();
-        if let Some(tx) = &self.names {
-            let _ = tx.try_send(names.to_vec());
+        if let Some(tx) = &self.names
+            && tx.try_send(missing.clone()).is_ok()
+        {
+            self.sent = missing;
+            self.sent_at = now;
         }
     }
     pub fn place(&self, name: &str) -> Option<&atlas::Place> {
@@ -150,7 +205,7 @@ impl Hud {
     }
     /// First photo in the scene that has a place we can show.
     fn scene_place(&self) -> Option<(&atlas::Place, Option<&TextureHandle>)> {
-        self.sent.iter().find_map(|n| {
+        self.shown.iter().find_map(|n| {
             let e = self.places.get(n)?;
             let p = e.place.as_ref()?;
             (e.map.is_some() || self.globe.is_some()).then_some((p, e.map.as_ref()))
@@ -185,7 +240,7 @@ impl Hud {
     fn card(&self, view: View, elapsed: f64, now: f64, sun: Sun, office: (f64, f64)) -> MapCard<'_> {
         let map = |i: usize| -> Option<MapCard<'_>> {
             let tex = self.maps[i].as_ref()?;
-            let v = self.status.as_ref().and_then(|s| if i == 0 { s.views.japan.as_ref() } else { s.views.local.as_ref() })?;
+            let v = &tex.meta;
             Some(MapCard::Map(MapLayer {
                 base: &tex.base,
                 radar: if tex.radar.len() == v.frames.len() { &tex.radar } else { &[] },
@@ -249,5 +304,81 @@ impl Hud {
             CardState { frame, current, previous, ready: &ready },
             &info,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex, mpsc};
+    fn fixture() -> (Hud, AtlasSlot, mpsc::Receiver<Vec<String>>, egui::Context) {
+        let slot: AtlasSlot = Arc::new(Mutex::new(VecDeque::new()));
+        let (tx, rx) = mpsc::sync_channel(16);
+        (Hud::new(Some(slot.clone()), Some(tx)), slot, rx, egui::Context::default())
+    }
+    fn names(n: &[&str]) -> Vec<String> {
+        n.iter().map(|s| s.to_string()).collect()
+    }
+    fn place(near: bool) -> Option<atlas::Place> {
+        Some(atlas::Place { place: "京都市".into(), lat: 35.0, lon: 135.75, taken: None, near })
+    }
+    fn image() -> egui::ColorImage {
+        egui::ColorImage::new([2, 2], vec![egui::Color32::WHITE; 4])
+    }
+    #[test]
+    fn asks_only_for_missing_places_and_retries_later() {
+        let (mut hud, slot, rx, ctx) = fixture();
+        hud.scene(&names(&["a.jpg", "b.jpg", "c.jpg"]), 0.0);
+        assert_eq!(rx.try_recv().unwrap(), names(&["a.jpg", "b.jpg", "c.jpg"]));
+        hud.scene(&names(&["a.jpg", "b.jpg", "c.jpg"]), 1.0);
+        assert!(rx.try_recv().is_err(), "no repeat within the retry window");
+        // a: no GPS (definite), b: near with its map. c never answered (atlas failed).
+        slot.lock().unwrap().extend([
+            AtlasEvent::Place { name: "a.jpg".into(), place: None, map: None },
+            AtlasEvent::Place { name: "b.jpg".into(), place: place(true), map: Some(image()) },
+        ]);
+        hud.receive(&ctx, 2.0);
+        assert!(hud.place("b.jpg").is_some() && hud.place("a.jpg").is_none());
+        hud.scene(&names(&["a.jpg", "b.jpg", "c.jpg"]), 3.0);
+        assert_eq!(rx.try_recv().unwrap(), names(&["c.jpg"]), "only the unanswered one");
+        hud.scene(&names(&["a.jpg", "b.jpg", "c.jpg"]), 10.0);
+        assert!(rx.try_recv().is_err());
+        hud.scene(&names(&["a.jpg", "b.jpg", "c.jpg"]), 3.0 + PLACE_RETRY_SECONDS);
+        assert_eq!(rx.try_recv().unwrap(), names(&["c.jpg"]), "retried");
+    }
+    #[test]
+    fn keeps_few_place_maps_and_refetches_dropped_ones() {
+        let (mut hud, slot, rx, ctx) = fixture();
+        for i in 0..12 {
+            slot.lock().unwrap().push_back(AtlasEvent::Place {
+                name: format!("{i}.jpg"),
+                place: place(true),
+                map: Some(image()),
+            });
+            hud.receive(&ctx, i as f64);
+        }
+        let maps = hud.places.values().filter(|e| e.map.is_some()).count();
+        assert_eq!(maps, PLACE_MAPS);
+        assert!(hud.places["0.jpg"].map.is_none() && hud.places["11.jpg"].map.is_some());
+        hud.scene(&names(&["0.jpg", "11.jpg"]), 20.0);
+        assert_eq!(rx.try_recv().unwrap(), names(&["0.jpg"]), "dropped map is fetched again");
+    }
+    #[test]
+    fn stale_weather_and_rain_are_cleared() {
+        let (mut hud, slot, _rx, ctx) = fixture();
+        let status = atlas::parse_status(
+            r#"{"generated_at":"x","weather":{"mood":"rain","label":"雨","max":20,"min":15},
+                "rain":{"summary":"雨","level":2,"series":[2,2,2,2,2,2,2,2,2,2,2,2]},
+                "views":{"globe":null,"japan":null,"local":null},"credits":[]}"#
+                .as_bytes(),
+        )
+        .unwrap();
+        slot.lock().unwrap().push_back(AtlasEvent::Status(status));
+        hud.receive(&ctx, 100.0);
+        assert!(hud.rain_expected());
+        hud.receive(&ctx, 100.0 + STATUS_STALE_SECONDS + 1.0);
+        let s = hud.status.as_ref().unwrap();
+        assert!(s.weather.is_none() && s.rain.is_none() && !hud.rain_expected());
+        assert_eq!(hud.state, "unavailable");
     }
 }

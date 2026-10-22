@@ -168,9 +168,12 @@ impl Cycle {
                 .unwrap_or(view);
             if next != view {
                 self.previous = Some(view);
+                view = next;
+                started = now;
+            } else {
+                // The only ready view stays fully shown; start its next dwell.
+                started = now - CROSSFADE_SECONDS;
             }
-            view = next;
-            started = now;
         }
         self.current = Some((view, started));
         let elapsed = (now - started).max(0.0);
@@ -312,8 +315,11 @@ mod tests {
         // A view that stops being ready is replaced immediately.
         let f = c.update(62.0, &[View::Japan], false).unwrap();
         assert_eq!((f.view, f.previous), (View::Japan, Some(View::Globe)));
-        // A single ready view stays put.
-        assert_eq!(c.update(200.0, &[View::Japan], false).unwrap().view, View::Japan);
+        // A single ready view stays put, without fading out and back in.
+        let f = c.update(200.0, &[View::Japan], false).unwrap();
+        assert_eq!((f.view, f.previous, f.blend), (View::Japan, None, 1.0));
+        let f = c.update(216.0, &[View::Japan], false).unwrap();
+        assert_eq!((f.view, f.previous, f.blend), (View::Japan, None, 1.0));
         // Photo comes after the neighbourhood when it is ready.
         let mut c = Cycle::default();
         c.update(0.0, &[View::Local, View::Photo], false);

@@ -135,8 +135,10 @@ instead of a map.
 | NASA GIBS WMS (EPSG:4326) | globe day (yesterday's VIIRS true colour over Blue Marble) and night lights | daily | keep the last good texture |
 | Nominatim reverse | municipality name | per rounded coordinate, cached on disk | 1 request/s at most, `accept-language=ja`, `zoom=10` |
 
-Configuration comes from the environment and never from the repository:
-`ATLAS_LAT`, `ATLAS_LON`, `ATLAS_FORECAST_OFFICE`, `ATLAS_FORECAST_AREA`,
+Defaults are the 2F office (public address, 広島市西区楠木町: 34.4080N
+132.4547E, forecast office 340000, area 340010, AMeDAS 67437); the
+environment can override them: `ATLAS_LAT`, `ATLAS_LON`,
+`ATLAS_FORECAST_OFFICE`, `ATLAS_FORECAST_AREA`, `ATLAS_TEMP_POINT`,
 `ATLAS_USER_AGENT`, `ATLAS_CACHE_DIR` (systemd `CacheDirectory=atlas`).
 
 ### Views

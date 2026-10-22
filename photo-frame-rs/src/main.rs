@@ -57,8 +57,9 @@ impl Default for Config {
             status_port: 8096,
             scale: 1.0,
             strip: true,
-            lat: 35.68,
-            lon: 139.77,
+            // The 2F office, 広島市西区楠木町.
+            lat: 34.4080,
+            lon: 132.4547,
         }
     }
 }
@@ -135,7 +136,7 @@ fn config_from(args: impl IntoIterator<Item = String>) -> Result<Option<Config>,
             }
             "--help" => {
                 println!(
-                    "Native Rust photo-frame prototype\n--fullscreen (default: windowed)\n--camera | --no-camera (default: disabled; shared loopback MJPEG at source rate, target 15fps)\n--camera-port N (loopback MJPEG source port; default 8082)\n--live-tile | --no-live-tile (draw the live camera into the largest collage card instead of the corner preview; implies camera)\n--run-seconds 1..3600 (automatic window close)\n--status-port 8096 or 8098..8199 (GET /health /status, loopback only)\n--scale 0.75..3 (physical pixels per logical egui point; default 1)\n--no-backdrops (disable small RAM-only blurred covers)\n--gestures (display-only overlay; implies camera mirror)\n--gesture-controls (explicit native photo navigation: screen left=next,right=previous; implies gestures/camera)\n--no-gesture-controls (display only)\n--no-strip (full-width collage without the info strip / atlas)\n--lat D --lon D (office position for the sun and the map marker; default 35.68 139.77)\nPhoto source fixed: loopback 8081; atlas loopback 8099. No external URLs, credential, file input, HTTP write controls, video or gaze."
+                    "Native Rust photo-frame prototype\n--fullscreen (default: windowed)\n--camera | --no-camera (default: disabled; shared loopback MJPEG at source rate, target 15fps)\n--camera-port N (loopback MJPEG source port; default 8082)\n--live-tile | --no-live-tile (draw the live camera into the largest collage card instead of the corner preview; implies camera)\n--run-seconds 1..3600 (automatic window close)\n--status-port 8096 or 8098..8199 (GET /health /status, loopback only)\n--scale 0.75..3 (physical pixels per logical egui point; default 1)\n--no-backdrops (disable small RAM-only blurred covers)\n--gestures (display-only overlay; implies camera mirror)\n--gesture-controls (explicit native photo navigation: screen left=next,right=previous; implies gestures/camera)\n--no-gesture-controls (display only)\n--no-strip (full-width collage without the info strip / atlas)\n--lat D --lon D (office position for the sun and the map marker; default 34.4080 132.4547 (Hiroshima office))\nPhoto source fixed: loopback 8081; atlas loopback 8099. No external URLs, credential, file input, HTTP write controls, video or gaze."
                 );
                 return Ok(None);
             }
@@ -1499,6 +1500,16 @@ mod tests {
                 .gesture_controls
         );
         assert!(parse(&["--gesture-controls", "--no-camera"]).is_err());
+    }
+    #[test]
+    fn strip_defaults_to_the_office_and_validates_position() {
+        let c = config_from(Vec::<String>::new()).unwrap().unwrap();
+        assert!(c.strip && (c.lat - 34.408).abs() < 1e-9 && (c.lon - 132.4547).abs() < 1e-9);
+        let args = |a: &[&str]| config_from(a.iter().map(|s| s.to_string()));
+        let c = args(&["--lat", "35.0", "--lon", "135.75", "--no-strip"]).unwrap().unwrap();
+        assert!(!c.strip && c.lat == 35.0 && c.lon == 135.75);
+        assert_eq!(args(&["--lat", "91"]).err(), Some("invalid_lat"));
+        assert_eq!(args(&["--lon", "x"]).err(), Some("invalid_lon"));
     }
     #[test]
     fn live_tile_implies_camera_and_can_opt_out() {

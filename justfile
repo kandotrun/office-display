@@ -2,9 +2,9 @@
 
 scratch := env_var_or_default("OFFICE_DISPLAY_DEV", "/tmp/office-display-dev")
 py := "uv run --no-project --with numpy --with pillow"
-# The office position comes from the environment, never from the repository.
-lat := env_var_or_default("ATLAS_LAT", "35.68")
-lon := env_var_or_default("ATLAS_LON", "139.77")
+# The 2F office (広島市西区楠木町); override with ATLAS_LAT / ATLAS_LON.
+lat := env_var_or_default("ATLAS_LAT", "34.4080")
+lon := env_var_or_default("ATLAS_LON", "132.4547")
 
 default: test
 

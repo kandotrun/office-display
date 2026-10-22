@@ -57,7 +57,7 @@
 | `--status-port 8096` | `GET /health` `/status`（ループバック限定） |
 | `--run-seconds N` | 自動終了（動作確認用） |
 | `--no-strip` | 右の情報帯を出さず、以前の全幅コラージュに戻す（atlas にも接続しない） |
-| `--lat D` / `--lon D` | オフィスの位置。太陽高度（配色）と地図・地球のマーカーに使う |
+| `--lat D` / `--lon D` | オフィスの位置。太陽高度（配色）と地図・地球のマーカーに使う（既定は広島のオフィス） |
 
 `--live-tile` は、いちばん大きなカードを選び、そこにライブ映像を描きます。写真のレイアウト計算には手を入れず、描画だけを差し替えるので、レイアウトの不変条件を壊しません。
 
@@ -110,10 +110,10 @@
 
 | 変数 | 既定 | 意味 |
 |---|---|---|
-| `ATLAS_LAT` / `ATLAS_LON` | （配備時に必須） | オフィスの位置 |
-| `ATLAS_FORECAST_OFFICE` | `130000` | 府県予報の発表官署コード |
-| `ATLAS_FORECAST_AREA` | `130010` | 府県予報の一次細分区域コード |
-| `ATLAS_TEMP_POINT` | `44132` | 気温を取るアメダス地点 |
+| `ATLAS_LAT` / `ATLAS_LON` | `34.4080` / `132.4547` | オフィスの位置（広島市西区楠木町） |
+| `ATLAS_FORECAST_OFFICE` | `340000` | 府県予報の発表官署コード（広島県） |
+| `ATLAS_FORECAST_AREA` | `340010` | 府県予報の一次細分区域コード（南部） |
+| `ATLAS_TEMP_POINT` | `67437` | 気温を取るアメダス地点（広島） |
 | `ATLAS_CACHE_DIR` | `/var/cache/atlas`（systemd） | タイル・衛星画像・地名のキャッシュ |
 
 ### 手元での確認
@@ -247,8 +247,8 @@ GET /status  {"db":…, "bands":[…], "text":…, "partial":…, "speaking":boo
 export DISPLAY_HOST=<display-host>
 export DISPLAY_USER=<display-user>
 export APP_ROOT=/home/$DISPLAY_USER/photo-frame-rs
-export ATLAS_LAT=<office-lat> ATLAS_LON=<office-lon>
-export ATLAS_FORECAST_OFFICE=<府県予報の官署コード> ATLAS_FORECAST_AREA=<一次細分区域> ATLAS_TEMP_POINT=<アメダス地点>
+# オフィスの位置と予報区は既定で広島（下表）。別の場所に置くときだけ上書きする
+# export ATLAS_LAT=... ATLAS_LON=... ATLAS_FORECAST_OFFICE=... ATLAS_FORECAST_AREA=... ATLAS_TEMP_POINT=...
 
 ./deploy/build-and-deploy.sh
 ```

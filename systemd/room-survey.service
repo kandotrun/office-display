@@ -11,7 +11,8 @@ Group=@USER@
 WorkingDirectory=@HOME@/room-survey
 Environment=SURVEY_PORT=8094
 Environment=SURVEY_AUDIO_DEVICE=@AUDIO_DEVICE@
-Environment=SURVEY_FPS=8
+# 6 fps leaves about a core for Vosk while speech is happening.
+Environment=SURVEY_FPS=6
 Environment=SURVEY_WIDTH=720
 Environment=SURVEY_HEIGHT=720
 # Needs an interpreter with numpy and Pillow.

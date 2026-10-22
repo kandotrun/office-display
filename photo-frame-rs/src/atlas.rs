@@ -162,9 +162,22 @@ pub enum AtlasEvent {
 pub type AtlasSlot = Arc<Mutex<VecDeque<AtlasEvent>>>;
 pub type Wake = Arc<Mutex<Option<eframe::egui::Context>>>;
 
+/// Images of one view must all come from the rev `/status` announced; atlas
+/// tags each with `X-Atlas-Rev`, and a mismatch means it refreshed mid-fetch.
+pub fn same_rev(response: &http::Response, rev: Option<u64>) -> Result<(), &'static str> {
+    match (rev, response.header("X-Atlas-Rev").map(str::parse::<u64>)) {
+        (None, _) | (Some(_), None) => Ok(()),
+        (Some(want), Some(Ok(got))) if want == got => Ok(()),
+        _ => Err("atlas_rev_changed"),
+    }
+}
 fn image(port: u16, path: &str) -> Result<ColorImage, &'static str> {
+    image_at(port, path, None)
+}
+fn image_at(port: u16, path: &str, rev: Option<u64>) -> Result<ColorImage, &'static str> {
     let response = http::get(port, path, decode::MAX_IMAGE_BYTES)?;
     http::require_type(&response, &["image/jpeg", "image/png"])?;
+    same_rev(&response, rev)?;
     let decoded = image::load_from_memory(&response.body).map_err(|_| "atlas_image_decode")?;
     if decoded.width() as usize > MAX_TEXTURE_SIDE || decoded.height() as usize > MAX_TEXTURE_SIDE {
         return Err("atlas_image_too_large");
@@ -175,10 +188,10 @@ fn image(port: u16, path: &str) -> Result<ColorImage, &'static str> {
         rgba.as_raw(),
     ))
 }
-fn map_images(port: u16, key: &str, frames: usize) -> Result<(ColorImage, Vec<ColorImage>), &'static str> {
-    let base = image(port, &format!("/map/{key}/base.jpg"))?;
+fn map_images(port: u16, key: &str, rev: u64, frames: usize) -> Result<(ColorImage, Vec<ColorImage>), &'static str> {
+    let base = image_at(port, &format!("/map/{key}/base.jpg"), Some(rev))?;
     let radar = (0..frames.min(MAX_FRAMES))
-        .map(|i| image(port, &format!("/map/{key}/radar/{i}.png")))
+        .map(|i| image_at(port, &format!("/map/{key}/radar/{i}.png"), Some(rev)))
         .collect::<Result<Vec<_>, _>>()?;
     Ok((base, radar))
 }
@@ -270,7 +283,7 @@ pub fn start(
                         if revs[i] == Some(v.rev) {
                             continue;
                         }
-                        if let Ok((base, radar)) = map_images(port, key, v.frames.len()) {
+                        if let Ok((base, radar)) = map_images(port, key, v.rev, v.frames.len()) {
                             revs[i] = Some(v.rev);
                             push(AtlasEvent::Map {
                                 view,
@@ -282,8 +295,10 @@ pub fn start(
                     }
                     if let Some(g) = &status.views.globe
                         && revs[2] != Some(g.rev)
-                        && let (Ok(day), Ok(night)) =
-                            (image(port, "/globe/day.jpg"), image(port, "/globe/night.jpg"))
+                        && let (Ok(day), Ok(night)) = (
+                            image_at(port, "/globe/day.jpg", Some(g.rev)),
+                            image_at(port, "/globe/night.jpg", Some(g.rev)),
+                        )
                     {
                         revs[2] = Some(g.rev);
                         push(AtlasEvent::Globe {
@@ -350,6 +365,18 @@ mod tests {
         assert!(parse_status(&vec![b' '; MAX_STATUS_BYTES + 1]).is_err());
         let long = "x".repeat(300);
         assert!(bad("くもり 夜 雨", &long).is_err());
+    }
+    #[test]
+    fn images_from_another_rev_are_rejected() {
+        let with = |h: Option<&str>| http::Response {
+            headers: h.map(|v| vec![("X-Atlas-Rev".to_string(), v.to_string())]).unwrap_or_default(),
+            body: vec![],
+        };
+        assert_eq!(same_rev(&with(Some("12")), Some(12)), Ok(()));
+        assert_eq!(same_rev(&with(Some("13")), Some(12)), Err("atlas_rev_changed"));
+        assert_eq!(same_rev(&with(Some("x")), Some(12)), Err("atlas_rev_changed"));
+        assert_eq!(same_rev(&with(None), Some(12)), Ok(()), "older atlas without the header");
+        assert_eq!(same_rev(&with(Some("13")), None), Ok(()));
     }
     #[test]
     fn places_parse_and_paths_escape() {

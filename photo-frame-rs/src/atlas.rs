@@ -179,10 +179,29 @@ fn image_at(port: u16, path: &str, rev: Option<u64>) -> Result<ColorImage, &'sta
     let response = http::get(port, path, decode::MAX_IMAGE_BYTES)?;
     http::require_type(&response, &["image/jpeg", "image/png"])?;
     same_rev(&response, rev)?;
-    let decoded = image::load_from_memory(&response.body).map_err(|_| "atlas_image_decode")?;
-    if decoded.width() as usize > MAX_TEXTURE_SIDE || decoded.height() as usize > MAX_TEXTURE_SIDE {
-        return Err("atlas_image_too_large");
+    decode_image(&response.body)
+}
+/// JPEG or PNG only, with the size checked from the header before any pixels
+/// are allocated, so a small file cannot expand into a huge texture.
+pub fn decode_image(bytes: &[u8]) -> Result<ColorImage, &'static str> {
+    use image::{ImageDecoder, ImageFormat, ImageReader, Limits};
+    let mut reader = ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|_| "atlas_image_format")?;
+    if !matches!(reader.format(), Some(ImageFormat::Jpeg | ImageFormat::Png)) {
+        return Err("atlas_image_format");
     }
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(MAX_TEXTURE_SIDE as u32);
+    limits.max_image_height = Some(MAX_TEXTURE_SIDE as u32);
+    limits.max_alloc = Some(decode::MAX_DECODE_ALLOC);
+    reader.limits(limits);
+    let decoder = reader.into_decoder().map_err(|_| "atlas_image_limit")?;
+    let (w, h) = decoder.dimensions();
+    if w == 0 || h == 0 || w as usize > MAX_TEXTURE_SIDE || h as usize > MAX_TEXTURE_SIDE {
+        return Err("atlas_image_limit");
+    }
+    let decoded = image::DynamicImage::from_decoder(decoder).map_err(|_| "atlas_image_decode")?;
     let rgba = decoded.to_rgba8();
     Ok(ColorImage::from_rgba_unmultiplied(
         [rgba.width() as usize, rgba.height() as usize],
@@ -368,6 +387,22 @@ mod tests {
         assert_eq!(same_rev(&with(Some("x")), Some(12)), Err("atlas_rev_changed"));
         assert_eq!(same_rev(&with(None), Some(12)), Ok(()), "older atlas without the header");
         assert_eq!(same_rev(&with(Some("13")), None), Ok(()));
+    }
+    fn png(w: u32, h: u32) -> Vec<u8> {
+        let i = image::DynamicImage::ImageRgba8(image::RgbaImage::new(w, h));
+        let mut out = std::io::Cursor::new(Vec::new());
+        i.write_to(&mut out, image::ImageFormat::Png).unwrap();
+        out.into_inner()
+    }
+    #[test]
+    fn imagery_decodes_within_limits_only() {
+        let ok = decode_image(&png(64, 48)).unwrap();
+        assert_eq!(ok.size, [64, 48]);
+        // A tiny file that would expand past the texture limit is refused by
+        // its header, before any pixels are allocated.
+        assert_eq!(decode_image(&png(MAX_TEXTURE_SIDE as u32 + 1, 1)).err(), Some("atlas_image_limit"));
+        assert!(decode_image(b"GIF89a....").is_err());
+        assert!(decode_image(b"not an image").is_err());
     }
     #[test]
     fn places_parse_and_paths_escape() {

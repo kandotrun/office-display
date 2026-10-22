@@ -27,6 +27,7 @@ CAMERA_URL = os.environ.get("SURVEY_CAMERA_URL", "http://127.0.0.1:8082/snapshot
 FACES_URL = os.environ.get("SURVEY_FACES_URL", "http://127.0.0.1:8093/status")
 STATS_URL = os.environ.get("SURVEY_STATS_URL", "http://127.0.0.1:8095/stats/week")
 REPORT_URL = os.environ.get("SURVEY_REPORT_URL", "http://127.0.0.1:8095/stats/report")
+SPEECH_URL = os.environ.get("SURVEY_SPEECH_URL", "http://127.0.0.1:8098/status")
 REPORT_AT = os.environ.get("SURVEY_REPORT_AT", "18:30")
 REPORT_SECONDS = float(os.environ.get("SURVEY_REPORT_SECONDS", "25"))
 PORT = int(os.environ.get("SURVEY_PORT", "8094"))
@@ -63,85 +64,22 @@ def load_font(size):
 
 
 BIG = load_font(21)
-HUGE = load_font(46)
-SMALL = load_font(13)
+TINY = load_font(11)
 
 
-class Audio:
-    """Microphone level and spectrum, from a long-lived arecord process."""
-
-    def __init__(self):
-        self.lock = threading.Lock()
-        self.bands = np.zeros(BANDS, dtype=np.float32)
-        self.db = -90.0
-        self.ceiling = -70.0
-
-    def start(self):
-        threading.Thread(target=self._loop, name="audio", daemon=True).start()
-
-    def _loop(self):
-        while True:
+def load_caption_font():
+    for path in ("/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",):
+        if os.path.exists(path):
             try:
-                # Capture both channels and average them: one reading looked
-                # 20 dB quieter in mono, but a controlled A/B showed the
-                # difference was a loud moment in the room, not the channel
-                # count. Stereo costs nothing and survives a dead channel.
-                proc = subprocess.Popen(
-                    ["arecord", "-q", "-D", AUDIO_DEVICE, "-f", "S16_LE",
-                     "-r", str(AUDIO_RATE), "-c", "2", "-t", "raw"],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
-                    bufsize=0,
-                )
-            except Exception:
-                time.sleep(2)
-                continue
-            window = np.zeros(0, dtype=np.float32)
-            while True:
-                try:
-                    chunk = proc.stdout.read(AUDIO_RATE // 5 * 4)
-                except Exception:
-                    break
-                if not chunk:
-                    break
-                frames = np.frombuffer(chunk, dtype=np.int16).reshape(-1, 2)
-                samples = frames.mean(axis=1).astype(np.float32) / 32768.0
-                window = np.concatenate([window, samples])[-8192:]
-                if len(window) < 4096:
-                    continue
-                self._update(window)
-            try:
-                proc.kill()
+                return ImageFont.truetype(path, 19)
             except Exception:
                 pass
-            time.sleep(1)
+    return load_font(19)
 
-    def _update(self, window):
-        rms = float(np.sqrt(np.mean(window ** 2)))
-        db = 20.0 * np.log10(max(rms, 1e-9))
-        spec = np.abs(np.fft.rfft(window * np.hanning(len(window))))
-        freqs = np.fft.rfftfreq(len(window), 1.0 / AUDIO_RATE)
-        edges = np.logspace(np.log10(40.0), np.log10(8000.0), BANDS + 1)
-        bands = np.zeros(BANDS, dtype=np.float32)
-        for i in range(BANDS):
-            mask = (freqs >= edges[i]) & (freqs < edges[i + 1])
-            if mask.any():
-                bands[i] = 20.0 * np.log10(max(float(spec[mask].mean()), 1e-9))
-            else:
-                bands[i] = -120.0
-        # Show the shape of the spectrum, not its absolute level: the room is
-        # often near the noise floor, so a fixed scale would look dead.
-        lo = float(bands.min())
-        hi = float(bands.max())
-        span = max(hi - lo, 8.0)
-        with self.lock:
-            self.db = db
-            self.ceiling = hi
-            self.bands = np.clip((bands - lo) / span, 0.0, 1.0)
 
-    def read(self):
-        with self.lock:
-            return self.db, self.bands.copy()
+CAPTION = load_caption_font()
+HUGE = load_font(46)
+SMALL = load_font(13)
 
 
 class Latest:
@@ -166,7 +104,6 @@ class Latest:
 
 
 LATEST = Latest()
-AUDIO = Audio()
 STATE = {"motion": 0.0, "faces": 0, "db": -90.0}
 STATS = {"grid": None, "at": 0.0}
 REPORT = {"until": 0.0, "data": None, "last_date": None}
@@ -183,6 +120,32 @@ def fetch_stats():
         except Exception:
             pass
         time.sleep(60)
+
+
+SPEECH = {"db": -90.0, "bands": [0.0] * 56, "text": "", "partial": "", "speaking": False, "at": 0.0}
+
+
+def speech_state():
+    """Level, spectrum and caption from the microphone owner (cached ~0.5 s)."""
+    now = time.monotonic()
+    if now - SPEECH["at"] > 0.5:
+        try:
+            with urllib.request.urlopen(SPEECH_URL, timeout=2) as response:
+                data = json.loads(response.read())
+            SPEECH.update(
+                db=float(data.get("db") or -90.0),
+                bands=data.get("bands") or SPEECH["bands"],
+                text=(data.get("text") or "").strip(),
+                partial=(data.get("partial") or "").strip(),
+                speaking=bool(data.get("speaking")),
+                at=now,
+            )
+        except Exception:
+            SPEECH["at"] = now
+    caption = SPEECH["text"]
+    if not caption or now - SPEECH["at"] > 20:
+        caption = SPEECH["partial"] if SPEECH["speaking"] else ""
+    return SPEECH["db"], np.asarray(SPEECH["bands"], dtype=np.float32), caption, SPEECH["speaking"]
 
 
 def fetch_snapshot():
@@ -241,7 +204,7 @@ def heatmap(draw, grid, x0, y0, cw, chh, now_hour):
                 draw.rectangle(box, outline=CONTOUR + (60,))
 
 
-def render(gray, motion, spec, db, faces, t):
+def render(gray, motion, spec, db, faces, t, caption="", speaking=False):
     img = Image.new("RGB", (W, H), BG)
     draw = ImageDraw.Draw(img, "RGBA")
 
@@ -323,6 +286,16 @@ def render(gray, motion, spec, db, faces, t):
         draw.text((x, 16), key, font=SMALL, fill=CONTOUR)
         draw.text((x, 34), value, font=BIG, fill=TEXT)
 
+    if caption:
+        band_top = footer_top - 62
+        draw.rectangle([0, band_top, W, footer_top - 6], fill=BG + (215,))
+        if speaking:
+            dot = (255, 120, 90, 235)
+            draw.ellipse([48, band_top + 22, 56, band_top + 30], fill=dot)
+            draw.text((64, band_top + 17), "LISTENING", font=TINY, fill=(255, 150, 120))
+        draw.text((W / 2, band_top + 34), caption[:38], font=CAPTION, fill=TEXT, anchor="mm")
+        if len(caption) > 38:
+            draw.text((W / 2, band_top + 54), caption[38:76], font=CAPTION, fill=TEXT, anchor="mm")
     draw.text((48, footer_top + 8), "2F DISPLAY / LIVE ANALYSIS", font=SMALL, fill=DIM)
     draw.text((W - 48, footer_top + 8), "SPECTRUM 40Hz-8kHz", font=SMALL, fill=DIM, anchor="ra")
     return img
@@ -453,7 +426,7 @@ def loop():
         if now - last_face_poll > 2.0:
             last_faces = fetch_faces()
             last_face_poll = now
-        db, spec = AUDIO.read()
+        db, spec, caption, speaking = speech_state()
 
         wall = datetime.now()
         if report_due(wall):
@@ -465,7 +438,7 @@ def loop():
         if REPORT["data"] is not None and time.monotonic() < REPORT["until"]:
             img = render_report(REPORT["data"])
         else:
-            img = render(frame, motion, spec, db, last_faces, now)
+            img = render(frame, motion, spec, db, last_faces, now, caption, speaking)
         buf = io.BytesIO()
         img.save(buf, "JPEG", quality=JPEG_QUALITY)
         seq += 1
@@ -531,7 +504,6 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    AUDIO.start()
     threading.Thread(target=fetch_stats, name="stats", daemon=True).start()
     threading.Thread(target=loop, name="render", daemon=True).start()
     server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)

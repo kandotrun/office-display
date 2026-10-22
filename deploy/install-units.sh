@@ -34,12 +34,16 @@ tar cf - -C presence . | $SSH "tar xf - -C $HOME_DIR/presence-dimmer"
 $SSH "mkdir -p $HOME_DIR/room-survey"
 tar cf - -C survey . | $SSH "tar xf - -C $HOME_DIR/room-survey"
 
+# speech (owns the microphone; rough captions)
+$SSH "mkdir -p $HOME_DIR/speech"
+tar cf - -C speech . | $SSH "tar xf - -C $HOME_DIR/speech"
+
 # office-stats (minute aggregates, SQLite)
 $SSH "mkdir -p $HOME_DIR/office-stats"
 tar cf - -C stats . | $SSH "tar xf - -C $HOME_DIR/office-stats"
 
 # systemd units
-for unit in photo-frame-rs.service presence-dimmer.service room-survey.service office-stats.service; do
+for unit in photo-frame-rs.service presence-dimmer.service room-survey.service office-stats.service speech.service; do
     echo "installing $unit"
     render "systemd/$unit" | $SSH "sudo tee /etc/systemd/system/$unit >/dev/null"
 done
@@ -49,7 +53,7 @@ render display-session/xinitrc | $SSH "cat > $HOME_DIR/.xinitrc && chmod +x $HOM
 render display-session/bash_profile | $SSH "cat > $HOME_DIR/.bash_profile"
 
 $SSH "sudo systemctl daemon-reload && \
-      sudo systemctl enable photo-frame-rs.service presence-dimmer.service room-survey.service office-stats.service"
+      sudo systemctl enable photo-frame-rs.service presence-dimmer.service room-survey.service office-stats.service speech.service"
 
 echo "installed. X session changes apply on the next reboot."
 echo "The photo frame starts from $APP_ROOT/current/bin — run build-and-deploy.sh first."

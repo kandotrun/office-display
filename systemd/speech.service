@@ -1,0 +1,27 @@
+[Unit]
+Description=Microphone owner and rough live captions for the 2F display
+After=sound.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=@USER@
+Group=@USER@
+WorkingDirectory=@HOME@/speech
+Environment=SPEECH_PORT=8098
+Environment=SPEECH_DEVICE=@AUDIO_DEVICE@
+Environment=SPEECH_MODEL=@HOME@/speech/vosk-model-small-ja-0.22
+# Needs a virtualenv containing vosk and numpy.
+ExecStart=@HOME@/speech/.venv/bin/python -u @HOME@/speech/speech_server.py
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=@HOME@/speech
+PrivateTmp=yes
+DevicePolicy=closed
+DeviceAllow=char-alsa rw
+
+[Install]
+WantedBy=graphical.target

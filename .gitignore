@@ -27,3 +27,7 @@ known_hosts
 # OS noise
 .DS_Store
 *.log
+
+# Python
+__pycache__/
+.pytest_cache/

@@ -86,7 +86,9 @@ impl Source for LoopbackSource {
             decode::MAX_IMAGE_BYTES,
         )?;
         http::require_type(&response, &["image/jpeg", "image/png"])?;
-        decode::decode(&response.body, self.backdrops, false)
+        let mut photo = decode::decode(&response.body, self.backdrops, false)?;
+        photo.name = name.to_string();
+        Ok(photo)
     }
 }
 const HISTORY_LIMIT: usize = 32;
@@ -585,6 +587,7 @@ mod tests {
                     ),
                     backdrop: None,
                     aspect: 1.0,
+                    name: String::new(),
                 })
             }
         }
@@ -710,6 +713,7 @@ mod tests {
                 ),
                 backdrop: None,
                 aspect: self.aspects.get(name).copied().unwrap_or(1.0),
+                name: name.to_string(),
             })
         }
     }

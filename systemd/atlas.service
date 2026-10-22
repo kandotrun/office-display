@@ -1,0 +1,29 @@
+[Unit]
+Description=Atlas: maps, rain radar, weather and globe for the 2F display info strip
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=@USER@
+Group=@USER@
+WorkingDirectory=@HOME@/atlas
+Environment=ATLAS_PORT=8099
+Environment=ATLAS_PHOTO_PORT=8081
+Environment=ATLAS_LAT=@ATLAS_LAT@ ATLAS_LON=@ATLAS_LON@
+Environment=ATLAS_FORECAST_OFFICE=@ATLAS_FORECAST_OFFICE@ ATLAS_FORECAST_AREA=@ATLAS_FORECAST_AREA@ ATLAS_TEMP_POINT=@ATLAS_TEMP_POINT@
+# OSM tiles (7 days minimum), globe textures and place names live here.
+CacheDirectory=atlas
+Environment=ATLAS_CACHE_DIR=/var/cache/atlas
+# Needs an interpreter with numpy and Pillow.
+ExecStart=@PYTHON@ -u @HOME@/atlas/atlas_server.py
+Restart=always
+RestartSec=5
+PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+
+[Install]
+WantedBy=multi-user.target

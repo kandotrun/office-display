@@ -1,7 +1,7 @@
 [Unit]
 Description=Native Rust photo frame for the 2F office display
-After=network-online.target
-Wants=network-online.target
+After=network-online.target atlas.service
+Wants=network-online.target atlas.service
 StartLimitIntervalSec=0
 
 [Service]
@@ -19,6 +19,10 @@ Environment=XDG_CONFIG_HOME=/run/photo-frame-rs/config
 Environment=XDG_CACHE_HOME=/run/photo-frame-rs/cache
 Environment=TMPDIR=/run/photo-frame-rs/tmp
 Environment=MESA_SHADER_CACHE_DISABLE=true
+# Office position for the sky and the map marker (also read by atlas). An
+# environment variable, not a flag, so rolling back to an older release works.
+Environment=ATLAS_LAT=@ATLAS_LAT@
+Environment=ATLAS_LON=@ATLAS_LON@
 ExecStartPre=/usr/bin/install -d -m 0700 /run/photo-frame-rs/tmp /run/photo-frame-rs/cache /run/photo-frame-rs/config
 # X is started by the tty1 autologin session, outside systemd target ordering.
 ExecStartPre=/usr/bin/timeout 120 /bin/sh -c "until [ -S /tmp/.X11-unix/X1 ]; do sleep 0.5; done"

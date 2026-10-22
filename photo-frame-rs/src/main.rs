@@ -5,8 +5,12 @@ use eframe::egui::{
     ViewportCommand,
 };
 use photo_frame_rs::{
-    Timeline,
+    Timeline, art, atlas, depth,
+    space::{self, Camera, V3},
     decode::DecodedPhoto,
+    hud::Hud,
+    strip, strip_paint,
+    theme::Palette,
     hand_overlay,
     layout::{self, Layout, Rect},
     navigation::{self, Decision},
@@ -35,6 +39,9 @@ struct Config {
     run_seconds: Option<f64>,
     status_port: u16,
     scale: f32,
+    strip: bool,
+    lat: f64,
+    lon: f64,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -49,14 +56,36 @@ impl Default for Config {
             run_seconds: None,
             status_port: 8096,
             scale: 1.0,
+            strip: true,
+            // The 2F office, 広島市西区楠木町.
+            lat: 34.4080,
+            lon: 132.4547,
         }
     }
 }
 fn config() -> Result<Option<Config>, &'static str> {
-    config_from(std::env::args().skip(1))
+    let env = |k: &str| std::env::var(k).ok();
+    config_with(env("ATLAS_LAT"), env("ATLAS_LON"), std::env::args().skip(1))
 }
+#[cfg(test)]
 fn config_from(args: impl IntoIterator<Item = String>) -> Result<Option<Config>, &'static str> {
+    config_with(None, None, args)
+}
+/// The office position may come from `ATLAS_LAT`/`ATLAS_LON` (the same
+/// variables atlas reads), so the unit file needs no flags an older release
+/// would reject; `--lat`/`--lon` still win.
+fn config_with(
+    lat: Option<String>,
+    lon: Option<String>,
+    args: impl IntoIterator<Item = String>,
+) -> Result<Option<Config>, &'static str> {
     let mut c = Config::default();
+    if let Some(v) = lat {
+        c.lat = v.parse::<f64>().ok().filter(|v| (-90.0..=90.0).contains(v)).ok_or("invalid_lat")?;
+    }
+    if let Some(v) = lon {
+        c.lon = v.parse::<f64>().ok().filter(|v| (-180.0..=180.0).contains(v)).ok_or("invalid_lon")?;
+    }
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -86,6 +115,21 @@ fn config_from(args: impl IntoIterator<Item = String>) -> Result<Option<Config>,
             }
             "--no-camera" => c.camera = false,
             "--no-backdrops" => c.backdrops = false,
+            "--no-strip" => c.strip = false,
+            "--lat" => {
+                c.lat = args
+                    .next()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .filter(|v| (-90.0..=90.0).contains(v))
+                    .ok_or("invalid_lat")?;
+            }
+            "--lon" => {
+                c.lon = args
+                    .next()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .filter(|v| (-180.0..=180.0).contains(v))
+                    .ok_or("invalid_lon")?;
+            }
             "--run-seconds" => {
                 let n = args
                     .next()
@@ -110,7 +154,7 @@ fn config_from(args: impl IntoIterator<Item = String>) -> Result<Option<Config>,
             }
             "--help" => {
                 println!(
-                    "Native Rust photo-frame prototype\n--fullscreen (default: windowed)\n--camera | --no-camera (default: disabled; shared loopback MJPEG at source rate, target 15fps)\n--camera-port N (loopback MJPEG source port; default 8082)\n--live-tile | --no-live-tile (draw the live camera into the largest collage card instead of the corner preview; implies camera)\n--run-seconds 1..3600 (automatic window close)\n--status-port 8096 or 8098..8199 (GET /health /status, loopback only)\n--scale 0.75..3 (physical pixels per logical egui point; default 1)\n--no-backdrops (disable small RAM-only blurred covers)\n--gestures (display-only overlay; implies camera mirror)\n--gesture-controls (explicit native photo navigation: screen left=next,right=previous; implies gestures/camera)\n--no-gesture-controls (display only)\nPhoto source fixed: loopback 8081. No external URLs, credential, file input, HTTP write controls, video or gaze."
+                    "Native Rust photo-frame prototype\n--fullscreen (default: windowed)\n--camera | --no-camera (default: disabled; shared loopback MJPEG at source rate, target 15fps)\n--camera-port N (loopback MJPEG source port; default 8082)\n--live-tile | --no-live-tile (draw the live camera into the largest collage card instead of the corner preview; implies camera)\n--run-seconds 1..3600 (automatic window close)\n--status-port 8096 or 8098..8199 (GET /health /status, loopback only)\n--scale 0.75..3 (physical pixels per logical egui point; default 1)\n--no-backdrops (disable small RAM-only blurred covers)\n--gestures (display-only overlay; implies camera mirror)\n--gesture-controls (explicit native photo navigation: screen left=next,right=previous; implies gestures/camera)\n--no-gesture-controls (display only)\n--no-strip (full-width collage without the info strip / atlas)\n--lat D --lon D (office position for the sun and the map marker; default 34.4080 132.4547 (Hiroshima office))\nPhoto source fixed: loopback 8081; atlas loopback 8099. No external URLs, credential, file input, HTTP write controls, video or gaze."
                 );
                 return Ok(None);
             }
@@ -149,6 +193,9 @@ struct GpuPhoto {
     texture: TextureHandle,
     backdrop: Option<TextureHandle>,
     aspect: f32,
+    name: String,
+    /// Average colour, used to tint the light in the sky.
+    tone: [u8; 3],
 }
 struct Scene {
     photos: Vec<GpuPhoto>,
@@ -183,15 +230,29 @@ impl Scene {
         }
     }
 }
+/// Mean colour over a sparse sample of pixels.
+fn tone(image: &egui::ColorImage) -> [u8; 3] {
+    let step = (image.pixels.len() / 2048).max(1);
+    let (mut sum, mut n) = ([0u64; 3], 0u64);
+    for p in image.pixels.iter().step_by(step) {
+        sum[0] += p.r() as u64;
+        sum[1] += p.g() as u64;
+        sum[2] += p.b() as u64;
+        n += 1;
+    }
+    sum.map(|v| (v / n.max(1)) as u8)
+}
 fn upload(ctx: &egui::Context, photos: Vec<DecodedPhoto>, layout: Layout, size: [f32; 2]) -> Scene {
     let photos = photos
         .into_iter()
         .map(|photo| GpuPhoto {
+            tone: tone(&photo.image),
             texture: ctx.load_texture("photo-slot", photo.image, TextureOptions::LINEAR),
             backdrop: photo
                 .backdrop
                 .map(|b| ctx.load_texture("backdrop-slot", b, TextureOptions::LINEAR)),
             aspect: photo.aspect,
+            name: photo.name,
         })
         .collect();
     Scene {
@@ -220,60 +281,101 @@ fn cover_uv(texture: Vec2, target: Vec2) -> egui::Rect {
         )
     }
 }
-/// Draw a scene. `skip_index` leaves one photo's card empty so the live camera
-/// can be drawn into it (card background and border are still painted).
+/// One card's 3D pose for this frame.
+#[derive(Clone, Copy)]
+struct CardPose {
+    alpha: f32,
+    yaw: f32,
+    z: f32,
+    zoom: f32,
+}
+/// A screen rect lifted onto its card's pose (turned about the card centre).
+fn lift(r: egui::Rect, card: egui::Rect, pose: CardPose) -> [V3; 4] {
+    let c = space::v3(card.center().x, card.center().y, 0.0);
+    space::rect_corners(r.min.x, r.min.y, r.width(), r.height())
+        .map(|p| p.turn(c, pose.yaw, 0.0).add(space::v3(0.0, 0.0, pose.z)))
+}
+fn uv_of(r: egui::Rect) -> [[f32; 2]; 2] {
+    [[r.min.x, r.min.y], [r.max.x, r.max.y]]
+}
+/// Screen bounding box of projected corners.
+fn screen_box(cam: &Camera, c: &[V3; 4]) -> Option<egui::Rect> {
+    let pts: Option<Vec<Pos2>> = c.iter().map(|p| depth::project(cam, *p)).collect();
+    pts.map(|p| egui::Rect::from_points(&p))
+}
+/// White print border around a photo, scaled to its size.
+fn matte(r: egui::Rect) -> f32 {
+    (r.width().min(r.height()) * 0.028).clamp(5.0, 14.0)
+}
+/// A light glancing across a print: a soft diagonal band at `progress` 0..1.
+fn glare(painter: &egui::Painter, cam: &Camera, c: &[V3; 4], progress: f32, alpha: f32) {
+    let centre = -0.35 + 1.7 * progress;
+    let width = 0.22;
+    let rows = 6;
+    let mut mesh = egui::epaint::Mesh::default();
+    for j in 0..=rows {
+        let v = j as f32 / rows as f32;
+        let skew = 0.3 * (v - 0.5);
+        for (du, a) in [(-width, 0.0), (0.0, 0.32), (width, 0.0)] {
+            let u = (centre + skew + du).clamp(0.0, 1.0);
+            let p = depth::project(cam, space::on_quad(c, u, v)).unwrap_or(Pos2::ZERO);
+            mesh.colored_vertex(p, Color32::from_white_alpha((a * alpha * 255.0) as u8));
+        }
+    }
+    for j in 0..rows as u32 {
+        let (a, b) = (3 * j, 3 * (j + 1));
+        for i in 0..2 {
+            mesh.add_triangle(a + i, a + i + 1, b + i);
+            mesh.add_triangle(a + i + 1, b + i, b + i + 1);
+        }
+    }
+    painter.add(egui::Shape::mesh(mesh));
+}
+/// Draw a scene in 3D as floating prints. `skip_index` leaves one card for the
+/// live camera, drawn by the caller with the same pose.
+#[allow(clippy::too_many_arguments)]
 fn paint_scene(
     painter: &egui::Painter,
     scene: &Scene,
     origin: Pos2,
-    alpha: f32,
+    cam: &Camera,
     skip_index: Option<usize>,
+    palette: &Palette,
+    hud: &Hud,
+    now: f64,
+    pose: impl Fn(usize) -> CardPose,
+    glance: impl Fn(usize) -> Option<f32>,
 ) -> usize {
-    if alpha <= 0.0 {
-        return 0;
-    }
-    let tint = Color32::from_white_alpha((alpha * 255.0) as u8);
-    let full = egui::Rect::from_min_max(Pos2::ZERO, Pos2::new(1., 1.));
     let mut draws = 0;
-    for p in &scene.layout.placements {
-        let photo = &scene.photos[p.index];
-        let card = rect(p.card, origin);
-        painter.rect_filled(
-            card,
-            12,
-            Color32::from_rgba_unmultiplied(22, 29, 38, (alpha * 255.) as u8),
-        );
-        if skip_index == Some(p.index) {
-            painter.rect_stroke(
-                card,
-                12,
-                Stroke::new(
-                    1_f32,
-                    Color32::from_rgba_unmultiplied(100, 115, 130, (alpha * 80.) as u8),
-                ),
-                StrokeKind::Inside,
-            );
+    for (order, p) in scene.layout.placements.iter().enumerate() {
+        let pose = pose(order);
+        if pose.alpha <= 0.0 || skip_index == Some(p.index) {
             continue;
         }
-        if let Some(backdrop) = &photo.backdrop {
-            painter.with_clip_rect(card.shrink(2.)).image(
-                backdrop.id(),
-                card,
-                cover_uv(backdrop.size_vec2(), card.size()),
-                Color32::from_rgba_unmultiplied(80, 80, 80, (alpha * 140.) as u8),
-            );
-        }
-        painter.rect_stroke(
-            card,
-            12,
-            Stroke::new(
-                1_f32,
-                Color32::from_rgba_unmultiplied(100, 115, 130, (alpha * 80.) as u8),
-            ),
-            StrokeKind::Inside,
+        let a = pose.alpha;
+        let photo = &scene.photos[p.index];
+        let card = rect(p.card, origin);
+        let fg = rect(p.foreground, origin);
+        let print = lift(fg.expand(matte(fg)), card, pose);
+        depth::shadow(painter, cam, &print, a * 1.6);
+        depth::filled(painter, cam, &print, Color32::from_rgba_unmultiplied(250, 248, 244, (a * 255.0) as u8));
+        let half = 0.5 / pose.zoom.max(1.0);
+        let image = lift(fg, card, pose);
+        depth::textured(
+            painter,
+            cam,
+            &image,
+            photo.texture.id(),
+            [[0.5 - half, 0.5 - half], [0.5 + half, 0.5 + half]],
+            Color32::from_white_alpha((a * 255.0) as u8),
+            10,
         );
-        let foreground = rect(p.foreground, origin);
-        painter.image(photo.texture.id(), foreground, full, tint);
+        if let Some(g) = glance(order) {
+            glare(painter, cam, &image, g, a);
+        }
+        if let (Some(place), Some(screen)) = (hud.place(&photo.name), screen_box(cam, &image)) {
+            strip_paint::place_chip(painter, screen, palette, place, now, a);
+        }
         draws += 1;
     }
     draws
@@ -327,30 +429,10 @@ fn live_tile_placement<'a>(scene: &'a Scene, aspect: f32) -> Option<&'a layout::
         .max_by(|a, b| score(a).total_cmp(&score(b)))
 }
 
-fn live_badge(painter: &egui::Painter, card: egui::Rect, now: f64) {
-    let pulse = ((now * 2.0).sin() * 0.5 + 0.5) as f32;
-    let origin = Pos2::new(card.left() + 22.0, card.bottom() - 18.0);
-    painter.rect_filled(
-        egui::Rect::from_min_size(origin - Vec2::new(10.0, 19.0), Vec2::new(62.0, 26.0)),
-        13,
-        Color32::from_rgba_unmultiplied(10, 14, 19, 190),
-    );
-    painter.circle_filled(
-        origin + Vec2::new(2.0, -6.0),
-        3.5,
-        Color32::from_rgba_unmultiplied(232, 74, 74, (150.0 + 105.0 * pulse) as u8),
-    );
-    painter.text(
-        origin + Vec2::new(12.0, 0.0),
-        Align2::LEFT_BOTTOM,
-        "LIVE",
-        FontId::proportional(12.),
-        Color32::from_rgb(236, 242, 247),
-    );
-}
 struct Feeds {
     camera: Option<CameraSlot>,
     hand: Option<hand_overlay::Slot>,
+    atlas: Option<(atlas::AtlasSlot, SyncSender<Vec<String>>)>,
 }
 struct App {
     config: Config,
@@ -384,6 +466,7 @@ struct App {
     navigation_last_action: Option<&'static str>,
     navigation_last_result: &'static str,
     navigation_notice: Option<(&'static str, f64)>,
+    hud: Hud,
 }
 impl App {
     fn new(
@@ -434,6 +517,9 @@ impl App {
             navigation_last_action: None,
             navigation_last_result: "idle",
             navigation_notice: None,
+            hud: feeds
+                .atlas
+                .map_or_else(Hud::default, |(slot, names)| Hud::new(Some(slot), Some(names))),
         }
     }
     /// Whether the layout must reserve space for the floating corner preview.
@@ -722,15 +808,76 @@ impl eframe::App for App {
         let mut draws = 0;
         let mut camera_drawn = false;
         let mut size = [0., 0.];
+        // The collage's own viewport: virtual with the strip, the canvas without.
+        let mut scene_size = [0., 0.];
+        let unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0.0, |d| d.as_secs_f64());
+        self.hud.receive(ctx, now);
+        let (palette, sun) = self.hud.palette(now, unix, self.config.lat, self.config.lon);
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(Color32::from_rgb(13, 17, 23)))
+            // No fill: the sky gradient covers the whole canvas.
+            .frame(egui::Frame::NONE)
             .show(ctx, |ui| {
                 let canvas = ui.max_rect();
-                let origin = canvas.min;
                 size = [canvas.width(), canvas.height()];
-                self.receive(ctx, size, now);
+                // With the strip, the collage lives in a virtual viewport drawn shifted.
+                let split = self.config.strip.then(|| strip::split(size[0], size[1]));
+                let origin;
+                (scene_size, origin) = split.map_or((size, canvas.min), |s| {
+                    (s.virtual_viewport, canvas.min + Vec2::new(s.offset[0], s.offset[1]))
+                });
+                self.receive(ctx, scene_size, now);
                 let painter = ui.painter_at(canvas);
+                let tones: Vec<[u8; 3]> = self
+                    .current
+                    .as_ref()
+                    .map(|c| c.photos.iter().map(|p| p.tone).collect())
+                    .unwrap_or_default();
+                art::sky(&painter, canvas, &palette);
+                art::stars(&painter, canvas, art::night(sun.elevation_deg), now);
+                art::aurora(&painter, canvas, &tones, &palette, now);
+                art::weather(&painter, canvas, self.hud.mood, now);
                 let alpha = self.timeline.alpha(now);
+                let area = split.map_or(canvas, |s| {
+                    egui::Rect::from_min_size(
+                        canvas.min + Vec2::new(s.collage.x, s.collage.y),
+                        Vec2::new(s.collage.w, s.collage.h),
+                    )
+                });
+                let (yaw, pitch) = space::sway(now);
+                let since = self.timeline.committed_at.map_or(f64::MAX, |t| now - t);
+                let kick = 1.0 - space::ease_out((since / 1.6) as f32);
+                let side = if self.counts.scene_id % 2 == 0 { 1.0 } else { -1.0 };
+                let cam = Camera {
+                    yaw: yaw + side * 0.09 * kick,
+                    pitch,
+                    // Sit the collage slightly back so the sway never pushes a print
+                    // into the strip; the scene change starts further away still.
+                    dolly: area.width() * 0.07 + 340.0 * kick,
+                    ..Camera::new([area.center().x, area.center().y], area.width() * 1.1)
+                };
+                art::bokeh(&painter, &cam, area, &palette, &tones, now);
+                let push_in = self.timeline.push_in(now);
+                let current_pose = |order: usize| {
+                    let m = self.timeline.card(now, order);
+                    let (yaw, z) = space::fly_in(m.alpha, order);
+                    CardPose {
+                        alpha: m.alpha,
+                        yaw,
+                        z: z + 22.0 * (now as f32 * 0.6 + order as f32 * 1.7).sin(),
+                        zoom: push_in,
+                    }
+                };
+                let previous_pose = |order: usize| {
+                    let (yaw, z) = space::fly_out(alpha, order);
+                    CardPose {
+                        alpha: 1.0 - alpha,
+                        yaw,
+                        z,
+                        zoom: 1.0 + photo_frame_rs::KEN_BURNS,
+                    }
+                };
                 let live_target = self.config.live_tile.then(|| {
                     self.current
                         .as_ref()
@@ -740,16 +887,12 @@ impl eframe::App for App {
                 let live_skip =
                     live_target.and_then(|p| self.camera_texture.is_some().then_some(p.index));
                 if let Some(previous) = &self.previous {
-                    draws += paint_scene(&painter, previous, origin, 1. - alpha, None);
+                    draws += paint_scene(&painter, previous, origin, &cam, None, &palette, &self.hud, now, previous_pose, |_| None);
                 }
                 if let Some(current) = &self.current {
-                    draws += paint_scene(
-                        &painter,
-                        current,
-                        origin,
-                        if self.previous.is_some() { alpha } else { 1. },
-                        live_skip,
-                    );
+                    draws += paint_scene(&painter, current, origin, &cam, live_skip, &palette, &self.hud, now, current_pose, |order| {
+                        self.timeline.glare(now, order)
+                    });
                 } else {
                     painter.text(
                         canvas.center(),
@@ -762,9 +905,27 @@ impl eframe::App for App {
                             "Loading photos..."
                         },
                         FontId::proportional(28.),
-                        Color32::from_rgb(160, 174, 189),
+                        strip_paint::color(palette.dim),
                     );
                 }
+                if let Some(split) = &split {
+                    let names: Vec<String> = self
+                        .current
+                        .as_ref()
+                        .map(|c| c.photos.iter().map(|p| p.name.clone()).collect())
+                        .unwrap_or_default();
+                    self.hud.scene(&names, now);
+                    self.hud.paint(
+                        &painter,
+                        canvas.min,
+                        split,
+                        &palette,
+                        sun,
+                        now,
+                        (self.config.lat, self.config.lon),
+                    );
+                }
+                if !self.config.strip {
                 painter.text(
                     origin + Vec2::new(28., 16.),
                     Align2::LEFT_TOP,
@@ -815,6 +976,7 @@ impl eframe::App for App {
                     FontId::proportional(13.),
                     Color32::from_rgb(132, 151, 167),
                 );
+                }
                 if self.config.camera {
                     if self.config.live_tile {
                         if let (Some(placement), Some(texture)) =
@@ -827,25 +989,37 @@ impl eframe::App for App {
                                     card.shrink(8.0),
                                     size.x / size.y.max(1.0),
                                 );
-                                painter.rect_filled(card, 12, Color32::from_rgb(7, 9, 13));
-                                painter.with_clip_rect(card.shrink(2.)).image(
+                                let order = self.current.as_ref().map_or(0, |c| {
+                                    c.layout
+                                        .placements
+                                        .iter()
+                                        .position(|q| q.index == placement.index)
+                                        .unwrap_or(0)
+                                });
+                                let pose = current_pose(order);
+                                let a = pose.alpha;
+                                let image = lift(target, card, pose);
+                                let print = lift(target.expand(matte(target)), card, pose);
+                                depth::shadow(&painter, &cam, &print, a * 1.6);
+                                depth::filled(&painter, &cam, &print, Color32::from_rgba_unmultiplied(250, 248, 244, (a * 255.0) as u8));
+                                depth::textured(
+                                    &painter,
+                                    &cam,
+                                    &image,
                                     texture.id(),
-                                    target,
-                                    cover_uv(size, target.size()),
-                                    Color32::WHITE,
+                                    uv_of(cover_uv(size, target.size())),
+                                    Color32::from_white_alpha((a * 255.0) as u8),
+                                    8,
                                 );
-                                painter.rect_stroke(
-                                    card,
-                                    12,
-                                    Stroke::new(2_f32, Color32::from_rgb(85, 106, 124)),
-                                    StrokeKind::Inside,
-                                );
-                                live_badge(&painter, target, now);
+                                if let Some(screen) = screen_box(&cam, &image) {
+                                    strip_paint::live_pill(&painter, screen, now, a);
+                                }
                                 camera_drawn = true;
                             }
                         }
                     } else {
-                        let box_ = layout::camera_rect(size[0], size[1]);
+                        // Same rect the layout reserved, in the collage's coordinates.
+                        let box_ = layout::camera_rect(scene_size[0], scene_size[1]);
                         let panel = rect(box_, origin);
                         painter.rect_filled(panel, 8, Color32::from_rgb(10, 14, 19));
                         if let Some(texture) = &self.camera_texture {
@@ -901,6 +1075,11 @@ impl eframe::App for App {
             });
         if let Ok(mut s) = self.state.lock() {
             s.gesture_navigation_enabled = self.config.gesture_controls;
+            s.strip_enabled = self.config.strip;
+            s.theme_phase = self.hud.phase;
+            s.theme_mood = self.hud.mood.map_or("none", |m| m.name());
+            s.atlas_state = self.hud.state;
+            s.strip_view = self.hud.view;
             s.navigation_pending = self.pending_navigation.is_some();
             s.navigation_requests = self.action_gate.accepted;
             s.navigation_dispatched = self.navigation_dispatched;
@@ -941,7 +1120,7 @@ impl eframe::App for App {
                         scene.layout.placements.iter().any(|p| {
                             layout::intersects(
                                 p.foreground,
-                                layout::camera_rect(size[0], size[1]).inset(-10.0),
+                                layout::camera_rect(scene_size[0], scene_size[1]).inset(-10.0),
                             )
                         })
                     });
@@ -992,11 +1171,8 @@ impl eframe::App for App {
             s.camera_texture_count = usize::from(self.camera_texture.is_some());
             s.camera_age_seconds = self.camera_captured.map(|t| t.elapsed().as_secs_f64());
         }
-        let repaint = if self.previous.is_some() || self.config.gestures {
-            Duration::from_millis(33)
-        } else {
-            Duration::from_secs(1)
-        };
+        // The sky, the sway and the strip move all the time.
+        let repaint = Duration::from_millis(33);
         let repaint = self.camera_captured.map_or(repaint, |captured| {
             repaint.min(
                 worker::CAMERA_STALE
@@ -1050,9 +1226,18 @@ fn run(config: Config) -> Result<(), &'static str> {
     } else {
         None
     };
+    let atlas_feed = if config.strip {
+        let (slot, names, handle) = atlas::start(atlas::ATLAS_PORT, stop.clone(), camera_wake.clone())
+            .map_err(|_| "atlas_worker_failed")?;
+        runtime.handles.push(handle);
+        Some((slot, names))
+    } else {
+        None
+    };
     let feeds = Feeds {
         camera: camera_slot,
         hand: hand_slot,
+        atlas: atlas_feed,
     };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -1131,6 +1316,7 @@ mod tests {
             navigation_last_action: None,
             navigation_last_result: "idle",
             navigation_notice: None,
+            hud: Hud::default(),
         };
         (app, results, commands)
     }
@@ -1140,6 +1326,7 @@ mod tests {
                 image: egui::ColorImage::new([20, 20], vec![Color32::WHITE; 400]),
                 backdrop: Some(egui::ColorImage::new([2, 2], vec![Color32::GRAY; 4])),
                 aspect: 1.,
+                name: String::new(),
             })
             .collect();
         let layout = layout::choose(&vec![1.; count], 1920., 1080., None, "").unwrap();
@@ -1322,6 +1509,24 @@ mod tests {
                 .gesture_controls
         );
         assert!(parse(&["--gesture-controls", "--no-camera"]).is_err());
+    }
+    #[test]
+    fn strip_defaults_to_the_office_and_validates_position() {
+        let c = config_from(Vec::<String>::new()).unwrap().unwrap();
+        assert!(c.strip && (c.lat - 34.408).abs() < 1e-9 && (c.lon - 132.4547).abs() < 1e-9);
+        let args = |a: &[&str]| config_from(a.iter().map(|s| s.to_string()));
+        let c = args(&["--lat", "35.0", "--lon", "135.75", "--no-strip"]).unwrap().unwrap();
+        assert!(!c.strip && c.lat == 35.0 && c.lon == 135.75);
+        assert_eq!(args(&["--lat", "91"]).err(), Some("invalid_lat"));
+        assert_eq!(args(&["--lon", "x"]).err(), Some("invalid_lon"));
+        let env = |lat: &str, lon: &str, a: &[&str]| {
+            config_with(Some(lat.into()), Some(lon.into()), a.iter().map(|s| s.to_string()))
+        };
+        let c = env("35.0", "135.75", &[]).unwrap().unwrap();
+        assert!(c.lat == 35.0 && c.lon == 135.75);
+        let c = env("35.0", "135.75", &["--lat", "34.0"]).unwrap().unwrap();
+        assert_eq!(c.lat, 34.0, "flags win over the environment");
+        assert_eq!(env("abc", "1", &[]).err(), Some("invalid_lat"));
     }
     #[test]
     fn live_tile_implies_camera_and_can_opt_out() {

@@ -82,9 +82,13 @@ class Audio:
     def _loop(self):
         while True:
             try:
+                # Capture both channels and average them: one reading looked
+                # 20 dB quieter in mono, but a controlled A/B showed the
+                # difference was a loud moment in the room, not the channel
+                # count. Stereo costs nothing and survives a dead channel.
                 proc = subprocess.Popen(
                     ["arecord", "-q", "-D", AUDIO_DEVICE, "-f", "S16_LE",
-                     "-r", str(AUDIO_RATE), "-c", "1", "-t", "raw"],
+                     "-r", str(AUDIO_RATE), "-c", "2", "-t", "raw"],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL,
                     bufsize=0,
@@ -95,12 +99,13 @@ class Audio:
             window = np.zeros(0, dtype=np.float32)
             while True:
                 try:
-                    chunk = proc.stdout.read(AUDIO_RATE // 5 * 2)
+                    chunk = proc.stdout.read(AUDIO_RATE // 5 * 4)
                 except Exception:
                     break
                 if not chunk:
                     break
-                samples = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
+                frames = np.frombuffer(chunk, dtype=np.int16).reshape(-1, 2)
+                samples = frames.mean(axis=1).astype(np.float32) / 32768.0
                 window = np.concatenate([window, samples])[-8192:]
                 if len(window) < 4096:
                     continue

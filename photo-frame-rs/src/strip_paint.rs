@@ -398,6 +398,15 @@ fn truncate_by_width(s: &str, max_width: f32, measure: impl Fn(&str) -> f32) -> 
     format!("{}…", &s[..ends[lo]])
 }
 
+/// Projected points this close together read as a single dot on the
+/// globe (Lahore and Kotli Loharan, ~110 km apart, project only a few
+/// points apart), so labelling both puts two names on one baseline
+/// with just the dot between them, like a single long place name.
+/// Only the first — loudest — of a close pair keeps its label.
+fn near_labelled(labelled: &[Pos2], p: Pos2, min_dist: f32) -> bool {
+    labelled.iter().any(|q| (*q - p).length() < min_dist)
+}
+
 /// SOC-style attack map: a globe with arcs flying into the target,
 /// counters on the left, origin ranking on the right, the last hour
 /// and the live feed along the bottom.
@@ -634,6 +643,7 @@ fn paint_honeypot(painter: &egui::Painter, rect: Rect, palette: &Palette, now: f
     // names — or a name and 「石狩 VPS」 — print on top of each other.
     let target_p = disc(target.0, target.1);
     let mut placed: Vec<Rect> = Vec::new();
+    let mut labelled: Vec<Pos2> = Vec::new();
     if let Some(tp) = target_p {
         let galley = painter.layout_no_wrap(format!("{} VPS", s.target.name), prop(13.0 * k), rgba(palette.text, opacity));
         let pill_size = galley.size() + Vec2::new(13.0 * k * 1.2, 13.0 * k * 0.6);
@@ -644,6 +654,9 @@ fn paint_honeypot(painter: &egui::Painter, rect: Rect, palette: &Palette, now: f
             if let Some(tp) = target_p
                 && (p - tp).length() < radius * 0.30
             {
+                continue;
+            }
+            if near_labelled(&labelled, p, 28.0 * k) {
                 continue;
             }
             let label = trunc(&a.place_label(), 16);
@@ -672,6 +685,7 @@ fn paint_honeypot(painter: &egui::Painter, rect: Rect, palette: &Palette, now: f
             }
             if let Some((anchor, align, r)) = chosen {
                 placed.push(r);
+                labelled.push(p);
                 text(painter, anchor, align, &label, prop(11.0 * k), rgba(palette.text, 0.85 * opacity));
             }
         }
@@ -736,5 +750,14 @@ mod tests {
         // Wide chars consume double: 4 wide chars (8) + ellipsis (1) <= 10,
         // 5 wide chars (10) + ellipsis would overflow.
         assert_eq!(truncate_by_width("コマンド実行テスト", 10.0, measure), "コマンド…");
+    }
+    #[test]
+    fn close_points_share_one_label() {
+        let labelled = [Pos2::new(100.0, 50.0)];
+        // A few points away (the Lahore / Kotli Loharan case): too close.
+        assert!(near_labelled(&labelled, Pos2::new(103.0, 54.0), 28.0));
+        // Clearly separate points keep their own labels.
+        assert!(!near_labelled(&labelled, Pos2::new(140.0, 50.0), 28.0));
+        assert!(!near_labelled(&[], Pos2::new(100.0, 50.0), 28.0));
     }
 }

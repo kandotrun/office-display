@@ -1,9 +1,10 @@
-//! Strip state: atlas textures, the view cycle and the eased palette.
+//! Strip state: atlas status and places, the honeypot snapshot, the
+//! globe textures and the eased palette.
 use crate::{
     atlas::{self, AtlasEvent, AtlasSlot},
-    globe,
-    strip::{self, Split, View},
-    strip_paint::{self, CardState, GlobeLayer, MapCard, MapLayer, PlaceLayer, StripInfo},
+    honeypot::{self, HoneypotEvent, HoneypotSlot},
+    strip::{self, Split},
+    strip_paint::{self, HoneypotLayer, StripInfo},
     theme::{self, Eased, Mood, Palette, Sun},
 };
 use eframe::egui::{self, Pos2, TextureHandle, TextureOptions};
@@ -12,12 +13,6 @@ use std::{
     sync::mpsc::SyncSender,
 };
 
-pub struct MapTex {
-    /// Frames and marker the textures were rendered for (not the latest status).
-    pub meta: atlas::MapView,
-    pub base: TextureHandle,
-    pub radar: Vec<TextureHandle>,
-}
 pub struct PlaceEntry {
     pub place: Option<atlas::Place>,
     pub map: Option<TextureHandle>,
@@ -28,15 +23,19 @@ const PLACE_LIMIT: usize = 128;
 const PLACE_MAPS: usize = 8;
 /// Weather and rain older than this are no longer shown as current.
 const STATUS_STALE_SECONDS: f64 = 1800.0;
+/// A honeypot snapshot older than this is no longer shown as current.
+const HONEYPOT_STALE_SECONDS: f64 = 120.0;
 /// Missing places are asked for again after this long.
 const PLACE_RETRY_SECONDS: f64 = 30.0;
 
 pub struct Hud {
     slot: Option<AtlasSlot>,
     names: Option<SyncSender<Vec<String>>>,
+    hp_slot: Option<HoneypotSlot>,
+    hp: Option<honeypot::Status>,
+    hp_at: f64,
     pub status: Option<atlas::Status>,
     pub state: &'static str,
-    maps: [Option<MapTex>; 2],
     globe: Option<(TextureHandle, TextureHandle)>,
     places: HashMap<String, PlaceEntry>,
     place_order: VecDeque<String>,
@@ -45,27 +44,30 @@ pub struct Hud {
     /// Photo names of the scene on screen.
     shown: Vec<String>,
     status_at: f64,
-    cycle: strip::Cycle,
     eased: Option<Eased>,
-    rain_series: Vec<u8>,
-    rain_since: f64,
     pub view: &'static str,
     pub phase: &'static str,
     pub mood: Option<Mood>,
 }
 impl Default for Hud {
     fn default() -> Self {
-        Self::new(None, None)
+        Self::new(None, None, None)
     }
 }
 impl Hud {
-    pub fn new(slot: Option<AtlasSlot>, names: Option<SyncSender<Vec<String>>>) -> Self {
+    pub fn new(
+        slot: Option<AtlasSlot>,
+        names: Option<SyncSender<Vec<String>>>,
+        hp_slot: Option<HoneypotSlot>,
+    ) -> Self {
         Self {
             state: if slot.is_some() { "connecting" } else { "disabled" },
             slot,
             names,
+            hp_slot,
+            hp: None,
+            hp_at: f64::NEG_INFINITY,
             status: None,
-            maps: [None, None],
             globe: None,
             places: HashMap::new(),
             place_order: VecDeque::new(),
@@ -73,10 +75,7 @@ impl Hud {
             sent_at: f64::NEG_INFINITY,
             shown: Vec::new(),
             status_at: f64::NEG_INFINITY,
-            cycle: strip::Cycle::default(),
             eased: None,
-            rain_series: Vec::new(),
-            rain_since: 0.0,
             view: "preparing",
             phase: "day",
             mood: None,
@@ -92,29 +91,13 @@ impl Hud {
         for event in events {
             match event {
                 AtlasEvent::Status(status) => {
-                    let series = status.rain.as_ref().map(|r| r.series.clone()).unwrap_or_default();
-                    if series != self.rain_series {
-                        self.rain_series = series;
-                        self.rain_since = now;
-                    }
-                    let v = &status.views;
-                    let ready = [v.globe.is_some(), v.japan.is_some(), v.local.is_some()];
-                    self.state = if ready.iter().all(|r| *r) && status.rain.is_some() {
-                        "ready"
-                    } else {
-                        "partial"
-                    };
+                    self.state = "ready";
                     self.status = Some(status);
                     self.status_at = now;
                 }
-                AtlasEvent::Map { view, meta, base, radar } => {
-                    let i = usize::from(view == View::Local);
-                    self.maps[i] = Some(MapTex {
-                        meta,
-                        base: load("atlas-base", base),
-                        radar: radar.into_iter().map(|r| load("atlas-radar", r)).collect(),
-                    });
-                }
+                // Map imagery belonged to the retired strip cycle; the
+                // atlas client still fetches it, the strip drops it.
+                AtlasEvent::Map { .. } => {}
                 AtlasEvent::Globe { day, night, .. } => {
                     self.globe = Some((load("globe-day", day), load("globe-night", night)));
                 }
@@ -131,6 +114,17 @@ impl Hud {
                     self.trim_place_maps();
                 }
                 AtlasEvent::Unavailable(_) => self.state = "unavailable",
+            }
+        }
+        let hp_events: Vec<HoneypotEvent> = self
+            .hp_slot
+            .as_ref()
+            .and_then(|s| s.lock().ok().map(|mut q| q.drain(..).collect()))
+            .unwrap_or_default();
+        for event in hp_events {
+            if let HoneypotEvent::Status(status) = event {
+                self.hp = Some(status);
+                self.hp_at = now;
             }
         }
         // Old weather must not pass for current; the maps themselves stay.
@@ -203,70 +197,6 @@ impl Hud {
         let eased = self.eased.get_or_insert_with(|| Eased::new(target, now));
         (eased.step(target, now), sun)
     }
-    /// First photo in the scene that has a place we can show.
-    fn scene_place(&self) -> Option<(&atlas::Place, Option<&TextureHandle>)> {
-        self.shown.iter().find_map(|n| {
-            let e = self.places.get(n)?;
-            let p = e.place.as_ref()?;
-            (e.map.is_some() || self.globe.is_some()).then_some((p, e.map.as_ref()))
-        })
-    }
-    fn ready(&self) -> Vec<View> {
-        let mut ready = Vec::new();
-        if self.globe.is_some() {
-            ready.push(View::Globe);
-        }
-        if self.maps[0].is_some() {
-            ready.push(View::Japan);
-        }
-        if self.maps[1].is_some() {
-            ready.push(View::Local);
-        }
-        if self.scene_place().is_some() {
-            ready.push(View::Photo);
-        }
-        ready
-    }
-    fn globe_card<'a>(
-        &'a self,
-        view: (f64, f64),
-        marker: Option<(f64, f64, &'a str)>,
-        sun: Sun,
-        office: (f64, f64),
-    ) -> Option<MapCard<'a>> {
-        let (day, night) = self.globe.as_ref()?;
-        Some(MapCard::Globe(GlobeLayer { day, night, view, sun, office, marker }))
-    }
-    fn card(&self, view: View, elapsed: f64, now: f64, sun: Sun, office: (f64, f64)) -> MapCard<'_> {
-        let map = |i: usize| -> Option<MapCard<'_>> {
-            let tex = self.maps[i].as_ref()?;
-            let v = &tex.meta;
-            Some(MapCard::Map(MapLayer {
-                base: &tex.base,
-                radar: if tex.radar.len() == v.frames.len() { &tex.radar } else { &[] },
-                frames: &v.frames,
-                now_index: v.now_index,
-                office: v.office,
-            }))
-        };
-        // The globe drifts ±20° around the office; far photo places pull it there.
-        let home = (office.0 * 0.7, office.1 + 20.0 * (now * std::f64::consts::TAU / 90.0).sin());
-        let globe = |centre, marker| self.globe_card(centre, marker, sun, office);
-        let card = match view {
-            View::Globe => globe(home, None),
-            View::Japan => map(0),
-            View::Local => map(1),
-            View::Photo => self.scene_place().and_then(|(p, tex)| match tex {
-                Some(t) if p.near => Some(MapCard::Place(PlaceLayer { map: t, place: &p.place })),
-                _ => {
-                    let t = ((elapsed / 2.0).clamp(0.0, 1.0) * std::f64::consts::PI / 2.0).sin();
-                    let centre = globe::slerp_lonlat((office.0 * 0.7, office.1), (p.lat, p.lon), t);
-                    globe(centre, Some((p.lat, p.lon, p.place.as_str())))
-                }
-            }),
-        };
-        card.unwrap_or(MapCard::Preparing)
-    }
     #[allow(clippy::too_many_arguments)]
     pub fn paint(
         &mut self,
@@ -276,20 +206,23 @@ impl Hud {
         palette: &Palette,
         sun: Sun,
         now: f64,
-        office: (f64, f64),
+        survey: Option<&TextureHandle>,
     ) {
-        let ready = self.ready();
-        let frame = self.cycle.update(now, &ready, self.rain_expected());
-        self.view = frame.map_or("preparing", |f| f.view.name());
-        let current = frame.map_or(MapCard::Preparing, |f| self.card(f.view, f.elapsed, now, sun, office));
-        let previous = frame
-            .and_then(|f| f.previous)
-            .map(|v| self.card(v, strip::DWELL_SECONDS, now, sun, office));
+        let hp_fresh = self.hp.is_some() && now - self.hp_at <= HONEYPOT_STALE_SECONDS;
+        self.view = if hp_fresh { "honeypot" } else { "preparing" };
+        let layer = if hp_fresh {
+            self.hp.as_ref().map(|status| HoneypotLayer {
+                status,
+                globe: self.globe.as_ref().map(|(d, n)| (d, n)),
+                sun,
+            })
+        } else {
+            None
+        };
         let status = self.status.as_ref();
         let info = StripInfo {
             weather: status.and_then(|s| s.weather.as_ref()),
             rain: status.and_then(|s| s.rain.as_ref()),
-            rain_since: self.rain_since,
             sun_elevation: sun.elevation_deg,
         };
         let blocks = strip::blocks(split.strip);
@@ -301,8 +234,9 @@ impl Hud {
             palette,
             chrono::Local::now(),
             now,
-            CardState { frame, current, previous, ready: &ready },
             &info,
+            layer.as_ref(),
+            survey,
         );
     }
 }
@@ -314,7 +248,7 @@ mod tests {
     fn fixture() -> (Hud, AtlasSlot, mpsc::Receiver<Vec<String>>, egui::Context) {
         let slot: AtlasSlot = Arc::new(Mutex::new(VecDeque::new()));
         let (tx, rx) = mpsc::sync_channel(16);
-        (Hud::new(Some(slot.clone()), Some(tx)), slot, rx, egui::Context::default())
+        (Hud::new(Some(slot.clone()), Some(tx), None), slot, rx, egui::Context::default())
     }
     fn names(n: &[&str]) -> Vec<String> {
         n.iter().map(|s| s.to_string()).collect()

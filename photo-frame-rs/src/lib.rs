@@ -7,6 +7,7 @@ pub mod depth;
 pub mod globe;
 pub mod hand_diagnostics;
 pub mod hand_overlay;
+pub mod honeypot;
 pub mod http;
 pub mod hud;
 pub mod layout;

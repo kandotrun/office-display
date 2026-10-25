@@ -8,6 +8,7 @@ use photo_frame_rs::{
     Timeline, art, atlas, depth,
     space::{self, Camera, V3},
     decode::DecodedPhoto,
+    honeypot,
     hud::Hud,
     strip, strip_paint,
     theme::Palette,
@@ -433,6 +434,7 @@ struct Feeds {
     camera: Option<CameraSlot>,
     hand: Option<hand_overlay::Slot>,
     atlas: Option<(atlas::AtlasSlot, SyncSender<Vec<String>>)>,
+    honeypot: Option<honeypot::HoneypotSlot>,
 }
 struct App {
     config: Config,
@@ -517,16 +519,18 @@ impl App {
             navigation_last_action: None,
             navigation_last_result: "idle",
             navigation_notice: None,
-            hud: feeds
-                .atlas
-                .map_or_else(Hud::default, |(slot, names)| Hud::new(Some(slot), Some(names))),
+            hud: feeds.atlas.map_or_else(Hud::default, |(slot, names)| {
+                Hud::new(Some(slot), Some(names), feeds.honeypot)
+            }),
         }
     }
     /// Whether the layout must reserve space for the floating corner preview.
     /// In live-tile mode the camera occupies a collage card instead, so the
     /// photos get the whole canvas.
     fn reserved_preview(&self) -> bool {
-        self.config.camera && !self.config.live_tile
+        // With the strip on, the survey lives in its own strip panel;
+        // the floating corner preview is only for strip-less layouts.
+        self.config.camera && !self.config.live_tile && !self.config.strip
     }
     fn receive(&mut self, ctx: &egui::Context, size: [f32; 2], now: f64) {
         let was_pending = self.pending;
@@ -922,8 +926,11 @@ impl eframe::App for App {
                         &palette,
                         sun,
                         now,
-                        (self.config.lat, self.config.lon),
+                        self.camera_texture.as_ref(),
                     );
+                    if self.camera_texture.is_some() {
+                        camera_drawn = true;
+                    }
                 }
                 if !self.config.strip {
                 painter.text(
@@ -1017,8 +1024,9 @@ impl eframe::App for App {
                                 camera_drawn = true;
                             }
                         }
-                    } else {
+                    } else if !self.config.strip {
                         // Same rect the layout reserved, in the collage's coordinates.
+                        // (With the strip on, the survey is drawn in its strip panel.)
                         let box_ = layout::camera_rect(scene_size[0], scene_size[1]);
                         let panel = rect(box_, origin);
                         painter.rect_filled(panel, 8, Color32::from_rgb(10, 14, 19));
@@ -1234,10 +1242,19 @@ fn run(config: Config) -> Result<(), &'static str> {
     } else {
         None
     };
+    let honeypot_feed = if config.strip {
+        let (slot, handle) = honeypot::start(honeypot::HONEYPOT_PORT, stop.clone(), camera_wake.clone())
+            .map_err(|_| "honeypot_worker_failed")?;
+        runtime.handles.push(handle);
+        Some(slot)
+    } else {
+        None
+    };
     let feeds = Feeds {
         camera: camera_slot,
         hand: hand_slot,
         atlas: atlas_feed,
+        honeypot: honeypot_feed,
     };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -1387,6 +1404,9 @@ mod tests {
         let (mut app, results, _commands) = fixture();
         let ctx = egui::Context::default();
         app.config.camera = true;
+        // The corner preview (and its reservation) exists only without
+        // the strip; with the strip the survey has its own panel.
+        app.config.strip = false;
         results.send(scene(4)).unwrap();
         app.receive(&ctx, [960., 540.], 1.);
         let scene = app.current.as_ref().unwrap();

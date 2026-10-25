@@ -35,6 +35,7 @@ fn get_with_deadline(
         || path == "/snapshot.jpg"
         || path.starts_with("/photos/")
         || (port == 8097 && path == "/status")
+        || (port == 8100 && path == "/status.json")
         || (port == 8099
             && (path == "/status"
                 || path.starts_with("/map/")

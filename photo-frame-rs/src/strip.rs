@@ -20,7 +20,7 @@ pub fn gap(width: f32) -> f32 {
 pub fn split(width: f32, height: f32) -> Split {
     let outer = outer(width);
     let gap = gap(width);
-    let strip_w = (width * 0.30).clamp(360.0, 640.0).min(width * 0.45);
+    let strip_w = (width * 0.50).clamp(360.0, 980.0).min(width * 0.55);
     let strip = Rect {
         x: width - outer - strip_w,
         y: outer,
@@ -47,41 +47,36 @@ pub fn split(width: f32, height: f32) -> Split {
 pub struct Blocks {
     pub clock: Rect,
     pub weather: Rect,
-    pub map: Rect,
-    pub rain: Rect,
+    /// The honeypot attack map: a permanent panel, not a cycle view.
+    pub honeypot: Rect,
+    /// The room-survey live panel, next to the honeypot panel.
+    pub survey: Rect,
     pub footer: Rect,
     /// Points per design unit: everything in the strip scales with this.
     pub scale: f32,
 }
 pub fn blocks(strip: Rect) -> Blocks {
     let k = (strip.h / 1000.0).clamp(0.45, 1.5);
-    let pad = 28.0 * k;
-    let gap = 22.0 * k;
+    let pad = 22.0 * k;
+    let gap = 14.0 * k;
     let x = strip.x + pad;
     let w = (strip.w - 2.0 * pad).max(0.0);
     let row = |y: f32, h: f32| Rect { x, y, w, h };
-    let clock = row(strip.y + pad, 150.0 * k);
-    let weather = row(clock.y + clock.h + gap * 0.5, 64.0 * k);
-    let footer_h = 40.0 * k;
+    let clock = row(strip.y + pad, 140.0 * k);
+    let weather = row(clock.y + clock.h + gap * 0.5, 92.0 * k);
+    let footer_h = 34.0 * k;
     let footer = row(strip.y + strip.h - pad - footer_h, footer_h);
-    let rain_h = 128.0 * k;
-    let rain = row(footer.y - gap - rain_h, rain_h);
-    let map_top = weather.y + weather.h + gap;
-    let room = (rain.y - gap - map_top).max(0.0);
-    // As large as fits, from 4:3 up to square; spare height goes around it.
-    let map_h = room.min(w).max(0.0);
-    let map_w = if map_h < w * 0.75 { map_h / 0.75 } else { w };
-    let map = Rect {
-        x: x + (w - map_w) / 2.0,
-        y: map_top + (room - map_h) / 2.0,
-        w: map_w,
-        h: map_h,
-    };
+    let top = weather.y + weather.h + gap;
+    let avail = (footer.y - gap - top).max(0.0);
+    // The attack map takes the larger share; the survey sits under it.
+    let honeypot_h = avail * 0.60;
+    let honeypot = row(top, honeypot_h);
+    let survey = row(top + honeypot_h + gap, (avail - honeypot_h - gap).max(0.0));
     Blocks {
         clock,
         weather,
-        map,
-        rain,
+        honeypot,
+        survey,
         footer,
         scale: k,
     }
@@ -236,12 +231,15 @@ mod tests {
     use super::*;
     use crate::layout;
     fn inside(r: Rect, c: Rect) -> bool {
+        // 1.5pt of slack: the layout scales its margins with the virtual
+        // (collage) width while the split scales with the screen width,
+        // so a card can land a fraction into the empty outer margin.
         r.w >= 0.0
             && r.h >= 0.0
-            && r.x >= c.x - 0.01
-            && r.y >= c.y - 0.01
-            && r.x + r.w <= c.x + c.w + 0.01
-            && r.y + r.h <= c.y + c.h + 0.01
+            && r.x >= c.x - 1.5
+            && r.y >= c.y - 1.5
+            && r.x + r.w <= c.x + c.w + 1.5
+            && r.y + r.h <= c.y + c.h + 1.5
     }
     const SIZES: [(f32, f32); 4] = [(3840., 2160.), (1920., 1080.), (960., 540.), (640., 360.)];
     #[test]
@@ -255,9 +253,10 @@ mod tests {
             assert!((s.strip.x + s.strip.w + outer(w) - w).abs() < 0.01, "flush right");
         }
         let s = split(1920., 1080.);
-        assert_eq!(s.strip.w, 576.0);
+        assert!((s.strip.w - 960.0).abs() < 0.01, "half the screen is the strip now: {}", s.strip.w);
         let b = blocks(s.strip);
-        assert!(b.map.w > 450.0 && (b.map.w - b.map.h).abs() < 20.0, "big, nearly square map at 1080p: {b:?}");
+        assert!(b.honeypot.w > 800.0 && b.honeypot.h > 350.0, "the attack map is the big panel at 1080p: {b:?}");
+        assert!(b.survey.h > 200.0 && b.honeypot.h > b.survey.h, "survey under it, smaller: {b:?}");
         assert_eq!(s.collage.y, 16.0);
     }
     #[test]
@@ -283,16 +282,15 @@ mod tests {
         for (w, h) in SIZES {
             let s = split(w, h);
             let b = blocks(s.strip);
-            let order = [b.clock, b.weather, b.map, b.rain, b.footer];
+            let order = [b.clock, b.weather, b.honeypot, b.survey, b.footer];
             for r in order {
                 assert!(inside(r, s.strip), "{w}x{h} {r:?}");
             }
             for pair in order.windows(2) {
                 assert!(pair[0].y + pair[0].h <= pair[1].y + 0.01, "{w}x{h} {pair:?}");
             }
-            let aspect = b.map.w / b.map.h;
-            assert!((1.0 - 0.01..=4.0 / 3.0 + 0.01).contains(&aspect), "{w}x{h} {aspect}");
-            assert!(b.map.w > 0.0);
+            assert!(b.honeypot.w > 0.0 && b.survey.w > 0.0);
+            assert!(b.honeypot.h >= b.survey.h, "the attack map keeps the larger share: {b:?}");
         }
     }
     #[test]

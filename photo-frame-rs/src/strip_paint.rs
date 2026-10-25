@@ -192,7 +192,10 @@ fn paint_survey(painter: &egui::Painter, rect: Rect, palette: &Palette, now: f64
         ),
     }
     painter.rect_stroke(rect, radius, Stroke::new(1.0, rgba([255, 255, 255], 0.18)), StrokeKind::Inside);
-    pill(painter, rect.left_top() + Vec2::new(14.0, 14.0) * k, "計測図", 16.0 * k, palette, 1.0);
+    let size = 16.0 * k;
+    let galley = painter.layout_no_wrap("計測図".to_string(), prop(size), rgba(palette.text, 1.0));
+    let width = galley.size().x + size * 1.2;
+    pill(painter, rect.right_top() + Vec2::new(-14.0 * k - width, 14.0 * k), "計測図", size, palette, 1.0);
     if panel.tex.is_some() {
         live_pill(painter, rect, now, 1.0);
     }

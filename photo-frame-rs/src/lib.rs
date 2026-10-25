@@ -18,6 +18,7 @@ pub mod space;
 pub mod status;
 pub mod strip;
 pub mod strip_paint;
+pub mod survey;
 pub mod theme;
 pub mod worker;
 

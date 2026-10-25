@@ -10,7 +10,7 @@ use photo_frame_rs::{
     decode::DecodedPhoto,
     honeypot,
     hud::Hud,
-    strip, strip_paint,
+    strip, strip_paint, survey,
     theme::Palette,
     hand_overlay,
     layout::{self, Layout, Rect},
@@ -435,6 +435,7 @@ struct Feeds {
     hand: Option<hand_overlay::Slot>,
     atlas: Option<(atlas::AtlasSlot, SyncSender<Vec<String>>)>,
     honeypot: Option<honeypot::HoneypotSlot>,
+    survey: Option<survey::SurveySlot>,
 }
 struct App {
     config: Config,
@@ -520,7 +521,7 @@ impl App {
             navigation_last_result: "idle",
             navigation_notice: None,
             hud: feeds.atlas.map_or_else(Hud::default, |(slot, names)| {
-                Hud::new(Some(slot), Some(names), feeds.honeypot)
+                Hud::new(Some(slot), Some(names), feeds.honeypot, feeds.survey)
             }),
         }
     }
@@ -1250,11 +1251,20 @@ fn run(config: Config) -> Result<(), &'static str> {
     } else {
         None
     };
+    let survey_feed = if config.strip && config.camera {
+        let (slot, handle) = survey::start(config.camera_port, stop.clone(), camera_wake.clone())
+            .map_err(|_| "survey_worker_failed")?;
+        runtime.handles.push(handle);
+        Some(slot)
+    } else {
+        None
+    };
     let feeds = Feeds {
         camera: camera_slot,
         hand: hand_slot,
         atlas: atlas_feed,
         honeypot: honeypot_feed,
+        survey: survey_feed,
     };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

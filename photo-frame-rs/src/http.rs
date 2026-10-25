@@ -33,6 +33,7 @@ fn get_with_deadline(
 ) -> Result<Response, &'static str> {
     if !(path == "/api/photos"
         || path == "/snapshot.jpg"
+        || path == "/status"
         || path.starts_with("/photos/")
         || (port == 8097 && path == "/status")
         || (port == 8100 && path == "/status.json")

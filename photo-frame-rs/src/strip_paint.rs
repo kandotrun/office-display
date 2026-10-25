@@ -85,6 +85,21 @@ pub struct StripInfo<'a> {
     pub sun_elevation: f64,
 }
 
+/// Live survey readings for the survey panel's data zone.
+pub struct SurveyLayer<'a> {
+    pub motion: f64,
+    pub db: f64,
+    pub faces: u32,
+    /// (time, motion) samples for the trend sparkline.
+    pub history: &'a [(f64, f32)],
+}
+/// Everything the survey panel draws: the MJPEG frame and, when the
+/// readings feed is live, the metrics beside it.
+pub struct SurveyPanel<'a> {
+    pub tex: Option<&'a TextureHandle>,
+    pub stats: Option<SurveyLayer<'a>>,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn paint_strip(
     painter: &egui::Painter,
@@ -96,7 +111,7 @@ pub fn paint_strip(
     now: f64,
     info: &StripInfo<'_>,
     honeypot: Option<&HoneypotLayer<'_>>,
-    survey: Option<&TextureHandle>,
+    survey: &SurveyPanel<'_>,
 ) {
     let k = blocks.scale;
     let r = |b: crate::layout::Rect| Rect::from_min_size(origin + Vec2::new(b.x, b.y), Vec2::new(b.w, b.h));
@@ -145,19 +160,29 @@ fn contain(rect: Rect, aspect: f32) -> Rect {
     Rect::from_center_size(rect.center(), Vec2::new(w, h))
 }
 
-/// The room survey as a permanent panel, drawn the way the atlas cards
-/// were framed: a dark window, the frame contained, a title and LIVE.
-fn paint_survey(painter: &egui::Painter, rect: Rect, palette: &Palette, now: f64, k: f32, tex: Option<&TextureHandle>) {
+/// The room survey as a permanent panel: the (square) frame on the
+/// left, its live readings as data on the right — the panel is wide,
+/// so the frame alone would leave most of it empty.
+fn paint_survey(painter: &egui::Painter, rect: Rect, palette: &Palette, now: f64, k: f32, panel: &SurveyPanel<'_>) {
     let radius = (16.0 * k) as u8;
     painter.rect_filled(rect, radius, rgba(mix(palette.panel, [0, 0, 0], 0.4), 0.85));
     let clip = painter.with_clip_rect(rect.shrink(1.0));
-    match tex {
-        Some(t) => {
+    let draw_frame = |area: Rect| {
+        if let Some(t) = panel.tex {
             let size = t.size_vec2();
-            let fit = contain(rect.shrink(8.0 * k), size.x / size.y.max(1.0));
+            let fit = contain(area, size.x / size.y.max(1.0));
             clip.image(t.id(), fit, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
         }
-        None => text(
+    };
+    match (&panel.stats, panel.tex) {
+        (Some(stats), _) => {
+            let side = (rect.height() - 16.0 * k).max(0.0);
+            let img = Rect::from_min_size(rect.left_top() + Vec2::splat(8.0 * k), Vec2::splat(side));
+            draw_frame(img);
+            paint_survey_stats(&clip, rect, palette, now, k, stats, img.right() + 18.0 * k);
+        }
+        (None, Some(_)) => draw_frame(rect.shrink(8.0 * k)),
+        (None, None) => text(
             &clip,
             rect.center(),
             Align2::CENTER_CENTER,
@@ -168,8 +193,52 @@ fn paint_survey(painter: &egui::Painter, rect: Rect, palette: &Palette, now: f64
     }
     painter.rect_stroke(rect, radius, Stroke::new(1.0, rgba([255, 255, 255], 0.18)), StrokeKind::Inside);
     pill(painter, rect.left_top() + Vec2::new(14.0, 14.0) * k, "計測図", 16.0 * k, palette, 1.0);
-    if tex.is_some() {
+    if panel.tex.is_some() {
         live_pill(painter, rect, now, 1.0);
+    }
+}
+
+/// The metrics zone of the survey panel: three readings with bars,
+/// and the motion trend underneath.
+fn paint_survey_stats(painter: &egui::Painter, rect: Rect, palette: &Palette, now: f64, k: f32, s: &SurveyLayer<'_>, x0: f32) {
+    let zone_w = (rect.right() - 16.0 * k - x0).max(0.0);
+    let col_w = zone_w / 3.0;
+    let cols: [(&str, String, f32, Rgb); 3] = [
+        ("MOTION", format!("{:.2}", s.motion), (s.motion / 4.0).clamp(0.0, 1.0) as f32, SOC_CYAN),
+        ("AUDIO dB", format!("{:.0}", s.db), ((s.db + 80.0) / 60.0).clamp(0.0, 1.0) as f32, SOC_GREEN),
+        ("FACES", format!("{}", s.faces), (s.faces as f64 / 5.0).clamp(0.0, 1.0) as f32, SOC_ORANGE),
+    ];
+    for (i, (label, value, frac, col)) in cols.iter().enumerate() {
+        let x = x0 + col_w * i as f32;
+        text(painter, Pos2::new(x, rect.top() + 30.0 * k), Align2::LEFT_TOP, label, prop(13.0 * k), rgba(palette.dim, 0.95));
+        text(painter, Pos2::new(x, rect.top() + 54.0 * k), Align2::LEFT_TOP, value, clock_font(40.0 * k), color(palette.text));
+        let track = Rect::from_min_size(Pos2::new(x, rect.top() + 112.0 * k), Vec2::new((col_w - 18.0 * k).max(0.0), 6.0 * k));
+        painter.rect_filled(track, 3, rgba(palette.dim, 0.25));
+        if *frac > 0.0 {
+            let fill = Rect::from_min_size(track.min, Vec2::new(track.width() * frac, track.height()));
+            painter.rect_filled(fill, 3, rgba(*col, 0.9));
+        }
+    }
+    // Motion trend over the samples the HUD kept (about ten minutes).
+    text(painter, Pos2::new(x0, rect.bottom() - 66.0 * k), Align2::LEFT_TOP, "MOTION · 10 MIN", prop(11.0 * k), rgba(palette.dim, 0.9));
+    let chart = Rect::from_min_size(
+        Pos2::new(x0, rect.bottom() - 48.0 * k),
+        Vec2::new(zone_w, 34.0 * k),
+    );
+    painter.line_segment([chart.left_bottom(), chart.right_bottom()], Stroke::new(1.0, rgba(palette.dim, 0.3)));
+    if s.history.len() >= 2 {
+        let t_end = s.history.last().map_or(now, |(t, _)| *t);
+        let vmax = s.history.iter().map(|(_, v)| *v).fold(1.5f32, f32::max);
+        let pts: Vec<Pos2> = s
+            .history
+            .iter()
+            .map(|(t, v)| {
+                let x = chart.right() - ((t_end - t) as f32 / 600.0) * chart.width();
+                let y = chart.bottom() - (v / vmax).clamp(0.0, 1.0) * chart.height();
+                Pos2::new(x.max(chart.left()), y)
+            })
+            .collect();
+        painter.add(Shape::line(pts, Stroke::new(1.5, rgba(SOC_CYAN, 0.85))));
     }
 }
 

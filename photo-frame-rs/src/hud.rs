@@ -4,7 +4,8 @@ use crate::{
     atlas::{self, AtlasEvent, AtlasSlot},
     honeypot::{self, HoneypotEvent, HoneypotSlot},
     strip::{self, Split},
-    strip_paint::{self, HoneypotLayer, StripInfo},
+    strip_paint::{self, HoneypotLayer, StripInfo, SurveyLayer, SurveyPanel},
+    survey::{self, SurveyEvent, SurveySlot},
     theme::{self, Eased, Mood, Palette, Sun},
 };
 use eframe::egui::{self, Pos2, TextureHandle, TextureOptions};
@@ -25,6 +26,12 @@ const PLACE_MAPS: usize = 8;
 const STATUS_STALE_SECONDS: f64 = 1800.0;
 /// A honeypot snapshot older than this is no longer shown as current.
 const HONEYPOT_STALE_SECONDS: f64 = 120.0;
+/// A survey reading older than this is no longer shown as current.
+const SURVEY_STALE_SECONDS: f64 = 10.0;
+/// Motion history for the survey sparkline: a sample every few
+/// seconds, capped to roughly the last ten minutes.
+const HISTORY_SAMPLE_SECONDS: f64 = 3.0;
+const HISTORY_CAP: usize = 200;
 /// Missing places are asked for again after this long.
 const PLACE_RETRY_SECONDS: f64 = 30.0;
 
@@ -34,6 +41,10 @@ pub struct Hud {
     hp_slot: Option<HoneypotSlot>,
     hp: Option<honeypot::Status>,
     hp_at: f64,
+    survey_slot: Option<SurveySlot>,
+    survey: Option<survey::Reading>,
+    survey_at: f64,
+    motion_history: VecDeque<(f64, f32)>,
     pub status: Option<atlas::Status>,
     pub state: &'static str,
     globe: Option<(TextureHandle, TextureHandle)>,
@@ -51,7 +62,7 @@ pub struct Hud {
 }
 impl Default for Hud {
     fn default() -> Self {
-        Self::new(None, None, None)
+        Self::new(None, None, None, None)
     }
 }
 impl Hud {
@@ -59,6 +70,7 @@ impl Hud {
         slot: Option<AtlasSlot>,
         names: Option<SyncSender<Vec<String>>>,
         hp_slot: Option<HoneypotSlot>,
+        survey_slot: Option<SurveySlot>,
     ) -> Self {
         Self {
             state: if slot.is_some() { "connecting" } else { "disabled" },
@@ -67,6 +79,10 @@ impl Hud {
             hp_slot,
             hp: None,
             hp_at: f64::NEG_INFINITY,
+            survey_slot,
+            survey: None,
+            survey_at: f64::NEG_INFINITY,
+            motion_history: VecDeque::new(),
             status: None,
             globe: None,
             places: HashMap::new(),
@@ -125,6 +141,27 @@ impl Hud {
             if let HoneypotEvent::Status(status) = event {
                 self.hp = Some(status);
                 self.hp_at = now;
+            }
+        }
+        let survey_events: Vec<SurveyEvent> = self
+            .survey_slot
+            .as_ref()
+            .and_then(|s| s.lock().ok().map(|mut q| q.drain(..).collect()))
+            .unwrap_or_default();
+        for event in survey_events {
+            if let SurveyEvent::Reading(reading) = event {
+                self.survey = Some(reading);
+                self.survey_at = now;
+                let due = self
+                    .motion_history
+                    .back()
+                    .is_none_or(|(t, _)| now - t >= HISTORY_SAMPLE_SECONDS);
+                if due {
+                    self.motion_history.push_back((now, reading.motion as f32));
+                    while self.motion_history.len() > HISTORY_CAP {
+                        self.motion_history.pop_front();
+                    }
+                }
             }
         }
         // Old weather must not pass for current; the maps themselves stay.
@@ -206,7 +243,7 @@ impl Hud {
         palette: &Palette,
         sun: Sun,
         now: f64,
-        survey: Option<&TextureHandle>,
+        survey_tex: Option<&TextureHandle>,
     ) {
         let hp_fresh = self.hp.is_some() && now - self.hp_at <= HONEYPOT_STALE_SECONDS;
         self.view = if hp_fresh { "honeypot" } else { "preparing" };
@@ -218,6 +255,22 @@ impl Hud {
             })
         } else {
             None
+        };
+        let survey_fresh = self.survey.is_some() && now - self.survey_at <= SURVEY_STALE_SECONDS;
+        let history = self.motion_history.make_contiguous();
+        let stats = if survey_fresh {
+            self.survey.as_ref().map(|r| SurveyLayer {
+                motion: r.motion,
+                db: r.db,
+                faces: r.faces,
+                history,
+            })
+        } else {
+            None
+        };
+        let panel = SurveyPanel {
+            tex: survey_tex,
+            stats,
         };
         let status = self.status.as_ref();
         let info = StripInfo {
@@ -236,7 +289,7 @@ impl Hud {
             now,
             &info,
             layer.as_ref(),
-            survey,
+            &panel,
         );
     }
 }
@@ -248,7 +301,7 @@ mod tests {
     fn fixture() -> (Hud, AtlasSlot, mpsc::Receiver<Vec<String>>, egui::Context) {
         let slot: AtlasSlot = Arc::new(Mutex::new(VecDeque::new()));
         let (tx, rx) = mpsc::sync_channel(16);
-        (Hud::new(Some(slot.clone()), Some(tx), None), slot, rx, egui::Context::default())
+        (Hud::new(Some(slot.clone()), Some(tx), None, None), slot, rx, egui::Context::default())
     }
     fn names(n: &[&str]) -> Vec<String> {
         n.iter().map(|s| s.to_string()).collect()

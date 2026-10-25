@@ -514,20 +514,25 @@ fn paint_honeypot(painter: &egui::Painter, rect: Rect, palette: &Palette, now: f
     }
     countries.sort_by(|a, b| b.1.cmp(&a.1));
     let max_c = countries.first().map_or(1, |c| c.1).max(1) as f32;
+    // The rail has to end above main_bottom: at the old 30k/17k steps
+    // the five origins plus four ports ran ~11k past it, so the last
+    // port row landed on the LAST 60 MIN sparkline and the orange line
+    // crossed its text. The tighter steps keep the whole rail inside
+    // the main area with the sparkline clear below it.
     let mut ry = main_top + 20.0 * k;
     for (name, count) in countries.iter().take(5) {
         text(painter, Pos2::new(right_x, ry), Align2::LEFT_TOP, &trunc(name, 13), prop(12.0 * k), rgba(palette.text, 0.92 * opacity));
         text(painter, Pos2::new(inner.right(), ry), Align2::RIGHT_TOP, &format!("{count}"), prop(12.0 * k), rgba(SOC_ORANGE, opacity));
         let bw = right_w * (*count as f32 / max_c);
         painter.rect_filled(Rect::from_min_size(Pos2::new(right_x, ry + 15.0 * k), Vec2::new(bw, 3.5 * k)), 1, rgba(SOC_CYAN, 0.65 * opacity));
-        ry += 30.0 * k;
+        ry += 26.0 * k;
     }
     text(painter, Pos2::new(right_x, ry + 4.0 * k), Align2::LEFT_TOP, "PORTS", prop(10.5 * k), rgba(SOC_CYAN, 0.8 * opacity));
     let mut py = ry + 22.0 * k;
     for (name, count) in s.canary.by_port.iter().take(4) {
         text(painter, Pos2::new(right_x, py), Align2::LEFT_TOP, &trunc(name, 14), prop(11.5 * k), rgba(palette.dim, 0.95 * opacity));
         text(painter, Pos2::new(inner.right(), py), Align2::RIGHT_TOP, &format!("{count}"), prop(11.5 * k), rgba(palette.text, 0.9 * opacity));
-        py += 17.0 * k;
+        py += 15.0 * k;
     }
 
     // The globe, drifting slowly around the Pacific side of Japan.

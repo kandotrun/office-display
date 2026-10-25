@@ -493,7 +493,10 @@ fn paint_honeypot(painter: &egui::Painter, rect: Rect, palette: &Palette, now: f
     let globe_left = inner.left() + left_w + 10.0 * k;
     let globe_right = right_x - 10.0 * k;
     let c = Pos2::new((globe_left + globe_right) / 2.0, main_top + main_h / 2.0);
-    let radius = ((globe_right - globe_left).min(main_h) * 0.44).max(10.0);
+    // Use nearly the full main height for the globe (diameter = 96% of
+    // the limiting dimension): at 0.44 it read small against the panel,
+    // with dead space above and below it.
+    let radius = ((globe_right - globe_left).min(main_h) * 0.48).max(10.0);
     let view_lat = 30.0;
     let view_lon = 152.0 + 16.0 * (now * std::f64::consts::TAU / 150.0).sin();
     glow(painter, c, radius * 0.98, radius * 1.30, rgba(SOC_CYAN, 0.30 * opacity));

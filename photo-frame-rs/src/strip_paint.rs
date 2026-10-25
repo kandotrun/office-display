@@ -220,10 +220,14 @@ fn paint_survey_stats(painter: &egui::Painter, rect: Rect, palette: &Palette, no
         }
     }
     // Motion trend over the samples the HUD kept (about ten minutes).
-    text(painter, Pos2::new(x0, rect.bottom() - 66.0 * k), Align2::LEFT_TOP, "MOTION · 10 MIN", prop(11.0 * k), rgba(palette.dim, 0.9));
-    let chart = Rect::from_min_size(
-        Pos2::new(x0, rect.bottom() - 48.0 * k),
-        Vec2::new(zone_w, 34.0 * k),
+    // The chart fills the space between the metric bars and the panel's
+    // bottom edge, so the metrics zone has no dead band in the middle.
+    let chart_bottom = rect.bottom() - 14.0 * k;
+    let chart_top = (rect.top() + 166.0 * k).min(chart_bottom - 34.0 * k);
+    text(painter, Pos2::new(x0, chart_top - 20.0 * k), Align2::LEFT_TOP, "MOTION · 10 MIN", prop(11.0 * k), rgba(palette.dim, 0.9));
+    let chart = Rect::from_min_max(
+        Pos2::new(x0, chart_top),
+        Pos2::new(x0 + zone_w, chart_bottom),
     );
     painter.line_segment([chart.left_bottom(), chart.right_bottom()], Stroke::new(1.0, rgba(palette.dim, 0.3)));
     if s.history.len() >= 2 {
@@ -243,21 +247,22 @@ fn paint_survey_stats(painter: &egui::Painter, rect: Rect, palette: &Palette, no
 }
 
 fn paint_clock(painter: &egui::Painter, rect: Rect, palette: &Palette, clock: DateTime<Local>, k: f32) {
-    let hm = clock.format("%H:%M").to_string();
+    let hm = clock.format("%H:%M:%S").to_string();
     let galley = painter.layout_no_wrap(hm, clock_font(112.0 * k), color(palette.text));
     let at = rect.left_top() + Vec2::new(-4.0 * k, -6.0 * k);
     let size = galley.size();
     painter.galley_with_override_text_color(at + Vec2::new(0.0, 2.5 * k), galley.clone(), Color32::from_black_alpha(60));
     painter.galley(at, galley, color(palette.text));
-    // Seconds as a quiet ring that fills over the minute.
-    let c = Pos2::new(at.x + size.x + 26.0 * k, at.y + size.y * 0.42);
-    let rr = 14.0 * k;
-    painter.circle_stroke(c, rr, Stroke::new(2.0 * k, rgba(palette.text, 0.18)));
-    let frac = (clock.second() as f32 + clock.nanosecond() as f32 / 1e9) / 60.0;
-    let pts: Vec<Pos2> = (0..=48)
-        .map(|i| c + Vec2::angled(-std::f32::consts::FRAC_PI_2 + frac * std::f32::consts::TAU * i as f32 / 48.0) * rr)
-        .collect();
-    painter.add(Shape::line(pts, Stroke::new(2.5 * k, color(palette.accent))));
+    // Centiseconds, small and quiet, sharing the digits' baseline.
+    let cs = format!(".{:02}", clock.nanosecond() / 10_000_000);
+    text(
+        painter,
+        Pos2::new(at.x + size.x + 8.0 * k, at.y + size.y),
+        Align2::LEFT_BOTTOM,
+        &cs,
+        clock_font(46.0 * k),
+        rgba(palette.accent, 0.9),
+    );
     text(
         painter,
         rect.left_bottom() + Vec2::new(0.0, -4.0 * k),

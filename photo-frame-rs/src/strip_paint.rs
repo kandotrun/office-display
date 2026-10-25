@@ -370,6 +370,34 @@ fn trunc(s: &str, n: usize) -> String {
     }
 }
 
+/// Truncate to a measured display width instead of a character count:
+/// feed lines mix narrow ASCII commands with wide Japanese labels, so a
+/// fixed character budget cut ASCII-heavy lines at ~60% of the panel
+/// width. `measure` returns the rendered width of a candidate string;
+/// the longest prefix that still fits with the ellipsis appended wins.
+fn truncate_by_width(s: &str, max_width: f32, measure: impl Fn(&str) -> f32) -> String {
+    if measure(s) <= max_width {
+        return s.to_string();
+    }
+    let ends: Vec<usize> = s.char_indices().map(|(i, _)| i).chain([s.len()]).collect();
+    // Invariant: prefixes shorter than `lo` chars fit with "…", the
+    // prefix of `hi` chars does not (the full string does not either).
+    let (mut lo, mut hi) = (0usize, ends.len() - 1);
+    while lo + 1 < hi {
+        let mid = (lo + hi) / 2;
+        let candidate = format!("{}…", &s[..ends[mid]]);
+        if measure(&candidate) <= max_width {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    if lo == 0 {
+        return "…".to_string();
+    }
+    format!("{}…", &s[..ends[lo]])
+}
+
 /// SOC-style attack map: a globe with arcs flying into the target,
 /// counters on the left, origin ranking on the right, the last hour
 /// and the live feed along the bottom.
@@ -423,9 +451,13 @@ fn paint_honeypot(painter: &egui::Painter, rect: Rect, palette: &Palette, now: f
             if g.city.is_empty() { g.country.clone() } else { format!("{} {}", g.country, g.city) }
         });
         let warn = f.kind.contains('⚠');
-        let line = trunc(&format!("{}  {}  {} {}", f.src, geo, f.kind, f.detail), 74);
+        let feed_font = prop(12.5 * k);
+        let max_w = inner.width() - 46.0 * k - 6.0 * k;
+        let line = truncate_by_width(&format!("{}  {}  {} {}", f.src, geo, f.kind, f.detail), max_w, |t| {
+            painter.layout_no_wrap(t.to_string(), feed_font.clone(), Color32::WHITE).size().x
+        });
         let c = if warn { SOC_ORANGE } else { palette.text };
-        text(painter, Pos2::new(inner.left() + 46.0 * k, fy), Align2::LEFT_TOP, &line, prop(12.5 * k), rgba(c, 0.92 * opacity));
+        text(painter, Pos2::new(inner.left() + 46.0 * k, fy), Align2::LEFT_TOP, &line, feed_font, rgba(c, 0.92 * opacity));
         fy += 18.0 * k;
     }
 
@@ -691,5 +723,18 @@ mod tests {
         assert_eq!(taken_label("2025-08").as_deref(), Some("2025年8月"));
         assert_eq!(taken_label("2025-13"), None);
         assert_eq!(taken_label("25-08"), None);
+    }
+    #[test]
+    fn width_truncation_uses_measured_width() {
+        // Fake metrics: ASCII / "…" cost 1 unit, wide chars cost 2.
+        let measure = |t: &str| t.chars().map(|c| if c.is_ascii() || c == '…' { 1.0 } else { 2.0 }).sum::<f32>();
+        // Fits untouched.
+        assert_eq!(truncate_by_width("echo hi", 20.0, measure), "echo hi");
+        // ASCII budget is spent on width, not on a fixed char count:
+        // 9 units of text + ellipsis exactly fills 10.
+        assert_eq!(truncate_by_width("echo; echo check_1234567890", 10.0, measure), "echo; ech…");
+        // Wide chars consume double: 4 wide chars (8) + ellipsis (1) <= 10,
+        // 5 wide chars (10) + ellipsis would overflow.
+        assert_eq!(truncate_by_width("コマンド実行テスト", 10.0, measure), "コマンド…");
     }
 }

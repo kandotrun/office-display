@@ -21,25 +21,28 @@ pub fn split(width: f32, height: f32) -> Split {
     let outer = outer(width);
     let gap = gap(width);
     let strip_w = (width * 0.50).clamp(360.0, 980.0).min(width * 0.55);
+    // The strip sits on the left: its content is left-aligned, so it
+    // reads first; the collage fills the rest of the screen.
     let strip = Rect {
-        x: width - outer - strip_w,
+        x: outer,
         y: outer,
         w: strip_w,
         h: (height - 2.0 * outer).max(0.0),
     };
     let collage = Rect {
-        x: outer,
+        x: outer + strip_w + gap,
         y: outer,
-        w: (strip.x - gap - outer).max(0.0),
+        w: (width - outer - (outer + strip_w + gap)).max(0.0),
         h: strip.h,
     };
-    // layout::choose reserves y 80..h-48 and x outer..w-outer.
-    let virtual_width = collage.x + collage.w + outer;
+    // layout::choose reserves y 80..h-48 and x outer..w-outer of the
+    // virtual viewport; the offset shifts its usable area onto `collage`.
+    let virtual_width = collage.w + 2.0 * outer;
     Split {
         collage,
         strip,
         virtual_viewport: [virtual_width, collage.h + 128.0],
-        offset: [0.0, outer - 80.0],
+        offset: [strip_w + gap, outer - 80.0],
     }
 }
 
@@ -250,7 +253,8 @@ mod tests {
             assert!(inside(s.collage, screen) && inside(s.strip, screen));
             assert!(!layout::intersects(s.collage, s.strip));
             assert!(s.strip.w >= w * 0.29 - 0.01 || s.strip.w >= 360.0 || s.strip.w >= w * 0.45 - 0.01);
-            assert!((s.strip.x + s.strip.w + outer(w) - w).abs() < 0.01, "flush right");
+            assert!((s.strip.x - outer(w)).abs() < 0.01, "strip flush left");
+            assert!((s.collage.x + s.collage.w + outer(w) - w).abs() < 0.01, "collage flush right");
         }
         let s = split(1920., 1080.);
         assert!((s.strip.w - 960.0).abs() < 0.01, "half the screen is the strip now: {}", s.strip.w);

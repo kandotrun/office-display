@@ -590,10 +590,20 @@ fn paint_honeypot(painter: &egui::Painter, rect: Rect, palette: &Palette, now: f
             painter.circle_filled(p, r, rgba(SOC_ORANGE, 0.95 * opacity));
         }
     }
-    // Labels for the loudest sources, kept clear of the target marker:
-    // sources near the target go unlabelled, and labels flip to the
-    // side of the point that faces away from the globe centre.
+    // Labels for the loudest sources, kept clear of each other and of
+    // the target marker: sources near the target go unlabelled, and a
+    // label is only drawn at the first of four placements (preferred /
+    // flipped side, above / below the point) whose rect clears the
+    // target pill and every label already placed. On the crowded side
+    // of the globe this drops a label instead of letting two place
+    // names — or a name and 「石狩 VPS」 — print on top of each other.
     let target_p = disc(target.0, target.1);
+    let mut placed: Vec<Rect> = Vec::new();
+    if let Some(tp) = target_p {
+        let galley = painter.layout_no_wrap(format!("{} VPS", s.target.name), prop(13.0 * k), rgba(palette.text, opacity));
+        let pill_size = galley.size() + Vec2::new(13.0 * k * 1.2, 13.0 * k * 0.6);
+        placed.push(Rect::from_min_size(tp + Vec2::new(10.0, -34.0) * k, pill_size).expand(4.0 * k));
+    }
     for a in with_geo.iter().take(5) {
         if let Some(p) = disc(a.lat.unwrap(), a.lon.unwrap()) {
             if let Some(tp) = target_p
@@ -602,10 +612,32 @@ fn paint_honeypot(painter: &egui::Painter, rect: Rect, palette: &Palette, now: f
                 continue;
             }
             let label = trunc(&a.place_label(), 16);
-            if p.x > c.x {
-                text(painter, p + Vec2::new(-9.0 * k, -9.0 * k), Align2::RIGHT_TOP, &label, prop(11.0 * k), rgba(palette.text, 0.85 * opacity));
-            } else {
-                text(painter, p + Vec2::new(9.0 * k, -9.0 * k), Align2::LEFT_TOP, &label, prop(11.0 * k), rgba(palette.text, 0.85 * opacity));
+            let galley = painter.layout_no_wrap(label.clone(), prop(11.0 * k), rgba(palette.text, 0.85 * opacity));
+            let size = galley.size();
+            let right_first = p.x > c.x;
+            let sides = if right_first { [true, false] } else { [false, true] };
+            let mut chosen: Option<(Pos2, Align2, Rect)> = None;
+            for dy in [-9.0 * k, 9.0 * k] {
+                for right in sides {
+                    let (anchor, align) = if right {
+                        (p + Vec2::new(-9.0 * k, dy), Align2::RIGHT_TOP)
+                    } else {
+                        (p + Vec2::new(9.0 * k, dy), Align2::LEFT_TOP)
+                    };
+                    let min = if right { Pos2::new(anchor.x - size.x, anchor.y) } else { anchor };
+                    let r = Rect::from_min_size(min, size);
+                    if !placed.iter().any(|q| r.expand(3.0 * k).intersects(*q)) {
+                        chosen = Some((anchor, align, r));
+                        break;
+                    }
+                }
+                if chosen.is_some() {
+                    break;
+                }
+            }
+            if let Some((anchor, align, r)) = chosen {
+                placed.push(r);
+                text(painter, anchor, align, &label, prop(11.0 * k), rgba(palette.text, 0.85 * opacity));
             }
         }
     }

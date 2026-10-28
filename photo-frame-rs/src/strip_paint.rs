@@ -415,6 +415,7 @@ fn near_labelled(labelled: &[Pos2], p: Pos2, min_dist: f32) -> bool {
 /// and the live feed along the bottom.
 fn paint_honeypot(painter: &egui::Painter, rect: Rect, palette: &Palette, now: f64, k: f32, h: &HoneypotLayer<'_>, opacity: f32) {
     let s = h.status;
+    let radar = s.source.as_deref() == Some("cloudflare-radar");
     painter.rect_filled(rect, 0, rgba([4, 10, 22], 0.90 * opacity));
     let grid = 26.0 * k;
     let mut gx = rect.left() + grid;
@@ -440,7 +441,7 @@ fn paint_honeypot(painter: &egui::Painter, rect: Rect, palette: &Palette, now: f
         Pos2::new(inner.left(), inner.bottom() - 96.0 * k),
         Vec2::new(inner.width(), 32.0 * k),
     );
-    text(painter, spark.left_top() - Vec2::new(0.0, 4.0 * k), Align2::LEFT_BOTTOM, "LAST 60 MIN", prop(10.5 * k), rgba(SOC_CYAN, 0.75 * opacity));
+    text(painter, spark.left_top() - Vec2::new(0.0, 4.0 * k), Align2::LEFT_BOTTOM, if radar { "L3 TREND" } else { "LAST 60 MIN" }, prop(10.5 * k), rgba(SOC_CYAN, 0.75 * opacity));
     painter.rect_stroke(spark, 2, Stroke::new(1.0, rgba(SOC_CYAN, 0.25 * opacity)), StrokeKind::Inside);
     let series = &s.events_per_minute;
     if series.len() > 1 {
@@ -482,8 +483,16 @@ fn paint_honeypot(painter: &egui::Painter, rect: Rect, palette: &Palette, now: f
     let metrics: [(&str, String, Rgb); 4] = [
         ("TODAY", format!("{}", s.cowrie.sessions_today), palette.text),
         ("LAST 1H", format!("{}", s.cowrie.sessions_1h), palette.text),
-        ("ACTIVE", format!("{active}"), if active > 0 { SOC_ORANGE } else { palette.text }),
-        ("CANARY", format!("{}", s.canary.events_today), palette.text),
+        if radar {
+            ("TARGETS", s.targets.as_ref().map_or(0, Vec::len).to_string(), palette.text)
+        } else {
+            ("ACTIVE", format!("{active}"), if active > 0 { SOC_ORANGE } else { palette.text })
+        },
+        if radar {
+            ("ORIGINS", s.origins.as_ref().map_or(0, Vec::len).to_string(), palette.text)
+        } else {
+            ("CANARY", format!("{}", s.canary.events_today), palette.text)
+        },
     ];
     let block_h = main_h / 4.0;
     for (i, (label, value, c)) in metrics.into_iter().enumerate() {
@@ -813,14 +822,14 @@ mod tests {
     use super::*;
     #[test]
     fn radar_and_legacy_rails_render_the_expected_labels() {
-        let render = |radar: bool| {
+        let render = |source: Option<&str>| {
             let mut value = serde_json::json!({
                 "generated_at": "2026-10-28T00:00:00Z",
                 "target": {"name": "Japan", "lat": 36.0, "lon": 138.0},
                 "canary": {"events_today": 0, "events_1h": 0, "by_port": [["SSH", 12]]}
             });
-            if radar {
-                value["source"] = serde_json::json!("cloudflare-radar");
+            if let Some(source) = source {
+                value["source"] = serde_json::json!(source);
                 value["pairs"] = serde_json::json!([]);
                 let countries = serde_json::json!([
                     {"code": "JP", "name": "Japan", "lat": 36.0, "lon": 138.0, "value": 42.5}
@@ -844,12 +853,29 @@ mod tests {
                 _ => None,
             }).collect::<Vec<_>>()
         };
-        let radar = render(true);
+        let radar = render(Some("cloudflare-radar"));
         for label in ["ORIGIN TOP 5", "TARGET TOP 5", "PROTOCOLS", "42.5%", "UDP", "TCP", "GRE", "ICMP", "93.0%"] {
             assert!(radar.iter().any(|t| t == label), "missing Radar label {label}");
         }
         assert!(!radar.iter().any(|t| t == "PORTS" || t.ends_with(" VPS")));
-        let legacy = render(false);
+        for label in ["TARGETS", "ORIGINS", "L3 TREND"] {
+            assert!(radar.iter().any(|t| t == label), "missing Radar label {label}");
+        }
+        for label in ["ACTIVE", "CANARY", "LAST 60 MIN"] {
+            assert!(!radar.iter().any(|t| t == label), "unexpected Radar label {label}");
+        }
+        // Missing and non-Radar sources both retain the honeypot counters and heading,
+        // even if a non-Radar source happens to supply the extended fields.
+        for source in [None, Some("honeypot")] {
+            let labels = render(source);
+            for label in ["ACTIVE", "CANARY", "LAST 60 MIN"] {
+                assert!(labels.iter().any(|t| t == label), "missing legacy label {label}");
+            }
+            for label in ["TARGETS", "ORIGINS", "L3 TREND"] {
+                assert!(!labels.iter().any(|t| t == label), "unexpected legacy label {label}");
+            }
+        }
+        let legacy = render(None);
         assert!(legacy.iter().any(|t| t == "PORTS"));
         assert!(legacy.iter().any(|t| t == "SSH"));
         assert!(legacy.iter().any(|t| t == "Japan VPS"));

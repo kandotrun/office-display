@@ -524,7 +524,13 @@ fn paint_honeypot(painter: &egui::Painter, rect: Rect, palette: &Palette, now: f
     // the main area with the sparkline clear below it.
     let mut ry = main_top + 20.0 * k;
     for (name, count) in countries.iter().take(5) {
-        text(painter, Pos2::new(right_x, ry), Align2::LEFT_TOP, &trunc(name, 13), prop(12.0 * k), rgba(palette.text, 0.92 * opacity));
+        let name_font = prop(12.0 * k);
+        let count_w = painter.layout_no_wrap(format!("{count}"), name_font.clone(), Color32::WHITE).size().x;
+        // Measure country names to preserve fitting text while leaving room for the count.
+        let name = truncate_by_width(name, right_w - count_w - 8.0 * k, |t| {
+            painter.layout_no_wrap(t.to_string(), name_font.clone(), Color32::WHITE).size().x
+        });
+        text(painter, Pos2::new(right_x, ry), Align2::LEFT_TOP, &name, name_font, rgba(palette.text, 0.92 * opacity));
         text(painter, Pos2::new(inner.right(), ry), Align2::RIGHT_TOP, &format!("{count}"), prop(12.0 * k), rgba(SOC_ORANGE, opacity));
         let bw = right_w * (*count as f32 / max_c);
         painter.rect_filled(Rect::from_min_size(Pos2::new(right_x, ry + 15.0 * k), Vec2::new(bw, 3.5 * k)), 1, rgba(SOC_CYAN, 0.65 * opacity));

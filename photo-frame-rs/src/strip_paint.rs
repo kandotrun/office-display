@@ -499,49 +499,100 @@ fn paint_honeypot(painter: &egui::Painter, rect: Rect, palette: &Palette, now: f
     // Right rail: origin countries, then canary ports.
     let right_w = 148.0 * k;
     let right_x = inner.right() - right_w;
-    text(painter, Pos2::new(right_x, main_top), Align2::LEFT_TOP, "ORIGIN TOP 5", prop(10.5 * k), rgba(SOC_CYAN, 0.8 * opacity));
-    let mut countries: Vec<(String, u32)> = Vec::new();
-    for a in &s.attackers {
-        let label = a.country_label();
-        let mut found = false;
-        for e in countries.iter_mut() {
-            if e.0 == label {
-                e.1 += a.count;
-                found = true;
-                break;
+    if s.origins.is_some() || s.targets.is_some() || s.protocols.is_some() {
+        let mut groups: Vec<(&str, Vec<(String, String, f32)>)> = Vec::new();
+        let shares = |items: &[honeypot::CountryShare]| items.iter().take(5).map(|v| {
+            (v.country.name.clone(), format!("{:.1}%", v.value), v.value as f32 / 100.0)
+        }).collect();
+        if let Some(origins) = &s.origins {
+            groups.push(("ORIGIN TOP 5", shares(origins)));
+        } else {
+            let mut countries = std::collections::BTreeMap::<String, u64>::new();
+            for attacker in &s.attackers {
+                *countries.entry(attacker.country_label()).or_default() += u64::from(attacker.count);
+            }
+            let mut countries: Vec<_> = countries.into_iter().collect();
+            countries.sort_by(|a, b| b.1.cmp(&a.1));
+            let max = countries.first().map_or(1, |c| c.1).max(1) as f32;
+            groups.push(("ORIGIN TOP 5", countries.into_iter().take(5).map(|(name, count)| {
+                (name, count.to_string(), count as f32 / max)
+            }).collect()));
+        }
+        if let Some(targets) = &s.targets {
+            groups.push(("TARGET TOP 5", shares(targets)));
+        }
+        if let Some(protocols) = &s.protocols {
+            groups.push(("PROTOCOLS", protocols.iter().take(4).map(|(name, value)| {
+                (name.clone(), format!("{value:.1}%"), *value as f32 / 100.0)
+            }).collect()));
+        } else {
+            groups.push(("PORTS", s.canary.by_port.iter().take(4).map(|(name, count)| {
+                (name.clone(), count.to_string(), 0.0)
+            }).collect()));
+        }
+        let rows = groups.iter().map(|(_, rows)| rows.len() + 1).sum::<usize>().max(1);
+        let step = (main_h / rows as f32).min(20.0 * k);
+        let font = prop((step * 0.65).min(11.5 * k));
+        let mut y = main_top;
+        for (title, rows) in groups {
+            text(painter, Pos2::new(right_x, y), Align2::LEFT_TOP, title, font.clone(), rgba(SOC_CYAN, 0.8 * opacity));
+            y += step;
+            for (name, value, share) in rows {
+                let value_w = painter.layout_no_wrap(value.clone(), font.clone(), Color32::WHITE).size().x;
+                let name = truncate_by_width(&name, right_w - value_w - 8.0 * k, |t| {
+                    painter.layout_no_wrap(t.to_string(), font.clone(), Color32::WHITE).size().x
+                });
+                text(painter, Pos2::new(right_x, y), Align2::LEFT_TOP, &name, font.clone(), rgba(palette.text, 0.92 * opacity));
+                text(painter, Pos2::new(inner.right(), y), Align2::RIGHT_TOP, &value, font.clone(), rgba(SOC_ORANGE, opacity));
+                painter.rect_filled(Rect::from_min_size(Pos2::new(right_x, y + step * 0.82), Vec2::new(right_w * share, 1.5 * k)), 0, rgba(SOC_CYAN, 0.65 * opacity));
+                y += step;
             }
         }
-        if !found {
-            countries.push((label, a.count));
+    } else {
+        text(painter, Pos2::new(right_x, main_top), Align2::LEFT_TOP, "ORIGIN TOP 5", prop(10.5 * k), rgba(SOC_CYAN, 0.8 * opacity));
+        let mut countries: Vec<(String, u32)> = Vec::new();
+        for a in &s.attackers {
+            let label = a.country_label();
+            let mut found = false;
+            for e in countries.iter_mut() {
+                if e.0 == label {
+                    e.1 += a.count;
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                countries.push((label, a.count));
+            }
         }
-    }
-    countries.sort_by(|a, b| b.1.cmp(&a.1));
-    let max_c = countries.first().map_or(1, |c| c.1).max(1) as f32;
-    // The rail has to end above main_bottom: at the old 30k/17k steps
-    // the five origins plus four ports ran ~11k past it, so the last
-    // port row landed on the LAST 60 MIN sparkline and the orange line
-    // crossed its text. The tighter steps keep the whole rail inside
-    // the main area with the sparkline clear below it.
-    let mut ry = main_top + 20.0 * k;
-    for (name, count) in countries.iter().take(5) {
-        let name_font = prop(12.0 * k);
-        let count_w = painter.layout_no_wrap(format!("{count}"), name_font.clone(), Color32::WHITE).size().x;
-        // Measure country names to preserve fitting text while leaving room for the count.
-        let name = truncate_by_width(name, right_w - count_w - 8.0 * k, |t| {
-            painter.layout_no_wrap(t.to_string(), name_font.clone(), Color32::WHITE).size().x
-        });
-        text(painter, Pos2::new(right_x, ry), Align2::LEFT_TOP, &name, name_font, rgba(palette.text, 0.92 * opacity));
-        text(painter, Pos2::new(inner.right(), ry), Align2::RIGHT_TOP, &format!("{count}"), prop(12.0 * k), rgba(SOC_ORANGE, opacity));
-        let bw = right_w * (*count as f32 / max_c);
-        painter.rect_filled(Rect::from_min_size(Pos2::new(right_x, ry + 15.0 * k), Vec2::new(bw, 3.5 * k)), 1, rgba(SOC_CYAN, 0.65 * opacity));
-        ry += 26.0 * k;
-    }
-    text(painter, Pos2::new(right_x, ry + 4.0 * k), Align2::LEFT_TOP, "PORTS", prop(10.5 * k), rgba(SOC_CYAN, 0.8 * opacity));
-    let mut py = ry + 22.0 * k;
-    for (name, count) in s.canary.by_port.iter().take(4) {
-        text(painter, Pos2::new(right_x, py), Align2::LEFT_TOP, &trunc(name, 14), prop(11.5 * k), rgba(palette.dim, 0.95 * opacity));
-        text(painter, Pos2::new(inner.right(), py), Align2::RIGHT_TOP, &format!("{count}"), prop(11.5 * k), rgba(palette.text, 0.9 * opacity));
-        py += 15.0 * k;
+        countries.sort_by(|a, b| b.1.cmp(&a.1));
+        let max_c = countries.first().map_or(1, |c| c.1).max(1) as f32;
+        // The rail has to end above main_bottom: at the old 30k/17k steps
+        // the five origins plus four ports ran ~11k past it, so the last
+        // port row landed on the LAST 60 MIN sparkline and the orange line
+        // crossed its text. The tighter steps keep the whole rail inside
+        // the main area with the sparkline clear below it.
+        let mut ry = main_top + 20.0 * k;
+        for (name, count) in countries.iter().take(5) {
+            let name_font = prop(12.0 * k);
+            let count_w = painter.layout_no_wrap(format!("{count}"), name_font.clone(), Color32::WHITE).size().x;
+            // Measure country names to preserve fitting text while leaving room for the count.
+            let name = truncate_by_width(name, right_w - count_w - 8.0 * k, |t| {
+                painter.layout_no_wrap(t.to_string(), name_font.clone(), Color32::WHITE).size().x
+            });
+            text(painter, Pos2::new(right_x, ry), Align2::LEFT_TOP, &name, name_font, rgba(palette.text, 0.92 * opacity));
+            text(painter, Pos2::new(inner.right(), ry), Align2::RIGHT_TOP, &format!("{count}"), prop(12.0 * k), rgba(SOC_ORANGE, opacity));
+            let bw = right_w * (*count as f32 / max_c);
+            painter.rect_filled(Rect::from_min_size(Pos2::new(right_x, ry + 15.0 * k), Vec2::new(bw, 3.5 * k)), 1, rgba(SOC_CYAN, 0.65 * opacity));
+            ry += 26.0 * k;
+        }
+        text(painter, Pos2::new(right_x, ry + 4.0 * k), Align2::LEFT_TOP, "PORTS", prop(10.5 * k), rgba(SOC_CYAN, 0.8 * opacity));
+        let mut py = ry + 22.0 * k;
+        for (name, count) in s.canary.by_port.iter().take(4) {
+            text(painter, Pos2::new(right_x, py), Align2::LEFT_TOP, &trunc(name, 14), prop(11.5 * k), rgba(palette.dim, 0.95 * opacity));
+            text(painter, Pos2::new(inner.right(), py), Align2::RIGHT_TOP, &format!("{count}"), prop(11.5 * k), rgba(palette.text, 0.9 * opacity));
+            py += 15.0 * k;
+        }
     }
 
     // The globe, drifting slowly around the Pacific side of Japan.
@@ -602,11 +653,15 @@ fn paint_honeypot(painter: &egui::Painter, rect: Rect, palette: &Palette, now: f
         }
     }
 
-    // Arcs from every geolocated source converging on the target.
+    // Radar supplies real source/destination pairs; legacy snapshots converge on target.
     let target = (s.target.lat, s.target.lon);
     let with_geo: Vec<&honeypot::Attacker> = s.attackers.iter().filter(|a| a.lat.is_some() && a.lon.is_some()).collect();
-    for (i, a) in with_geo.iter().take(16).enumerate() {
-        let from = (a.lat.unwrap(), a.lon.unwrap());
+    for (i, arc) in s.attack_arcs().iter().enumerate() {
+        let from = arc.from;
+        let target = arc.to;
+        let radar = s.pairs.is_some();
+        let width = if radar { 2.8 * arc.strength * k } else { 1.1 };
+        let alpha = if radar { 0.75 * arc.strength } else { 0.30 };
         let mut pts: Vec<Pos2> = Vec::new();
         for step in 0..=36 {
             let u = step as f64 / 36.0;
@@ -618,7 +673,7 @@ fn paint_honeypot(painter: &egui::Painter, rect: Rect, palette: &Palette, now: f
                 }
                 None => {
                     if pts.len() > 1 {
-                        painter.add(Shape::line(std::mem::take(&mut pts), Stroke::new(1.1, rgba(SOC_ORANGE, 0.30 * opacity))));
+                        painter.add(Shape::line(std::mem::take(&mut pts), Stroke::new(width, rgba(SOC_ORANGE, alpha * opacity))));
                     } else {
                         pts.clear();
                     }
@@ -626,7 +681,7 @@ fn paint_honeypot(painter: &egui::Painter, rect: Rect, palette: &Palette, now: f
             }
         }
         if pts.len() > 1 {
-            painter.add(Shape::line(pts, Stroke::new(1.1, rgba(SOC_ORANGE, 0.30 * opacity))));
+            painter.add(Shape::line(pts, Stroke::new(width, rgba(SOC_ORANGE, alpha * opacity))));
         }
         let phase = (now * 0.16 + i as f64 * 0.37).rem_euclid(1.0);
         for trail in 0..5 {
@@ -639,13 +694,21 @@ fn paint_honeypot(painter: &egui::Painter, rect: Rect, palette: &Palette, now: f
                 let lift = 1.0 + 0.22 * ((std::f64::consts::PI * u).sin() as f32);
                 let at = Pos2::new(c.x + p[0] * radius * lift, c.y - p[1] * radius * lift);
                 let r = (3.0 - trail as f32 * 0.45) * k;
-                painter.circle_filled(at, r.max(0.8), rgba([255, 210, 138], (0.95 - trail as f32 * 0.18) * opacity));
+                painter.circle_filled(at, r.max(0.8), rgba([255, 210, 138], (0.95 - trail as f32 * 0.18) * arc.strength * opacity));
             }
         }
         if let Some(p) = disc(from.0, from.1) {
-            let r = (2.4 + ((a.count as f64 + 1.0).log10() as f32) * 1.7) * k;
+            let r = (2.4 + ((arc.value + 1.0).log10() as f32) * 1.7) * k;
             glow(painter, p, 0.0, r * 3.0, rgba(SOC_ORANGE, 0.45 * opacity));
             painter.circle_filled(p, r, rgba(SOC_ORANGE, 0.95 * opacity));
+        }
+    }
+    if let Some(pairs) = &s.pairs {
+        for pair in pairs.iter().filter(|p| p.value > 0.0) {
+            if let Some(p) = disc(pair.to.lat, pair.to.lon) {
+                glow(painter, p, 0.0, 9.0 * k, rgba(SOC_GREEN, 0.35 * opacity));
+                painter.circle_filled(p, 2.8 * k, rgba(SOC_GREEN, opacity));
+            }
         }
     }
     // Labels for the loudest sources, kept clear of each other and of
@@ -655,11 +718,16 @@ fn paint_honeypot(painter: &egui::Painter, rect: Rect, palette: &Palette, now: f
     // target pill and every label already placed. On the crowded side
     // of the globe this drops a label instead of letting two place
     // names — or a name and 「石狩 VPS」 — print on top of each other.
+    let target_label = if s.pairs.is_some() || s.source.as_deref() == Some("cloudflare-radar") {
+        s.target.name.clone()
+    } else {
+        format!("{} VPS", s.target.name)
+    };
     let target_p = disc(target.0, target.1);
     let mut placed: Vec<Rect> = Vec::new();
     let mut labelled: Vec<Pos2> = Vec::new();
     if let Some(tp) = target_p {
-        let galley = painter.layout_no_wrap(format!("{} VPS", s.target.name), prop(13.0 * k), rgba(palette.text, opacity));
+        let galley = painter.layout_no_wrap(target_label.clone(), prop(13.0 * k), rgba(palette.text, opacity));
         let pill_size = galley.size() + Vec2::new(13.0 * k * 1.2, 13.0 * k * 0.6);
         placed.push(Rect::from_min_size(tp + Vec2::new(10.0, -34.0) * k, pill_size).expand(4.0 * k));
     }
@@ -709,7 +777,7 @@ fn paint_honeypot(painter: &egui::Painter, rect: Rect, palette: &Palette, now: f
         glow(painter, p, 0.0, 16.0 * k, rgba(SOC_GREEN, 0.6 * opacity));
         painter.circle_stroke(p, 4.0 * k + ph * 18.0 * k, Stroke::new(1.5, rgba(SOC_GREEN, (1.0 - ph) * opacity)));
         painter.circle_filled(p, 3.6 * k, rgba(SOC_GREEN, opacity));
-        pill(painter, p + Vec2::new(10.0, -34.0) * k, &format!("{} VPS", s.target.name), 13.0 * k, palette, opacity);
+        pill(painter, p + Vec2::new(10.0, -34.0) * k, &target_label, 13.0 * k, palette, opacity);
     }
 }
 
@@ -743,6 +811,50 @@ pub fn live_pill(painter: &egui::Painter, print: Rect, now: f64, opacity: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn radar_and_legacy_rails_render_the_expected_labels() {
+        let render = |radar: bool| {
+            let mut value = serde_json::json!({
+                "generated_at": "2026-10-28T00:00:00Z",
+                "target": {"name": "Japan", "lat": 36.0, "lon": 138.0},
+                "canary": {"events_today": 0, "events_1h": 0, "by_port": [["SSH", 12]]}
+            });
+            if radar {
+                value["source"] = serde_json::json!("cloudflare-radar");
+                value["pairs"] = serde_json::json!([]);
+                let countries = serde_json::json!([
+                    {"code": "JP", "name": "Japan", "lat": 36.0, "lon": 138.0, "value": 42.5}
+                ]);
+                value["origins"] = countries.clone();
+                value["targets"] = countries;
+                value["protocols"] = serde_json::json!([["UDP", 93.0], ["TCP", 6.6], ["GRE", 0.3], ["ICMP", 0.1]]);
+            }
+            let status = honeypot::parse_status(&serde_json::to_vec(&value).unwrap()).unwrap();
+            let ctx = egui::Context::default();
+            let mut fonts = egui::FontDefinitions::default();
+            fonts.families.insert(FontFamily::Name(CLOCK_FAMILY.into()), fonts.families[&FontFamily::Proportional].clone());
+            ctx.set_fonts(fonts);
+            let output = ctx.run(egui::RawInput::default(), |ctx| {
+                let painter = ctx.layer_painter(egui::LayerId::background());
+                paint_honeypot(&painter, Rect::from_min_size(Pos2::ZERO, Vec2::new(900.0, 600.0)), &crate::theme::NIGHT, 0.0, 1.0,
+                    &HoneypotLayer { status: &status, globe: None, sun: crate::theme::sun(0.0, 0.0, 0.0) }, 1.0);
+            });
+            output.shapes.into_iter().filter_map(|s| match s.shape {
+                Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            }).collect::<Vec<_>>()
+        };
+        let radar = render(true);
+        for label in ["ORIGIN TOP 5", "TARGET TOP 5", "PROTOCOLS", "42.5%", "UDP", "TCP", "GRE", "ICMP", "93.0%"] {
+            assert!(radar.iter().any(|t| t == label), "missing Radar label {label}");
+        }
+        assert!(!radar.iter().any(|t| t == "PORTS" || t.ends_with(" VPS")));
+        let legacy = render(false);
+        assert!(legacy.iter().any(|t| t == "PORTS"));
+        assert!(legacy.iter().any(|t| t == "SSH"));
+        assert!(legacy.iter().any(|t| t == "Japan VPS"));
+        assert!(!legacy.iter().any(|t| t == "PROTOCOLS" || t == "TARGET TOP 5"));
+    }
     #[test]
     fn japanese_labels() {
         let d = NaiveDate::from_ymd_opt(2026, 10, 22).unwrap();

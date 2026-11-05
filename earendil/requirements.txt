@@ -1,2 +1,2 @@
-# earendil needs only the standard library and the official Anthropic SDK.
-anthropic>=2.5,<3
+# DeepSeek's OpenAI-compatible API, using the official OpenAI Python SDK.
+openai>=2.0,<3

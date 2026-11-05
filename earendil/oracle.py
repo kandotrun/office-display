@@ -1,43 +1,42 @@
-"""Asking Claude what Earendil would do (the official anthropic SDK, streamed).
+"""Asking DeepSeek what Earendil would do (OpenAI-compatible API, streamed).
 
 One request per question:
 
-    client.beta.messages.stream(model, max_tokens=4000, output_config={"effort": ...},
-                                betas=["server-side-fallback-2026-07-01"], fallbacks="default",
-                                system=[persona.md rendered, cache_control ephemeral],
-                                messages=history + [question])
+    client.chat.completions.create(model="deepseek-flash", max_tokens=4000,
+                                   reasoning_effort="none", stream=True,
+                                   messages=[system] + history + [question])
 
-No sampling parameters and no thinking configuration: the model thinks
-adaptively by default and rejects both. The answer arrives as
+Thinking is disabled by default for prompt spoken replies. If enabled through
+reasoning_effort, reasoning_content is ignored: only delta.content reaches the
+screen and voice. The answer arrives as
 
     [Title, Title]          line 1: the values it is grounded in (or [])
     エンデルヒールなら、…    the rest: what is spoken, cut to 400 characters
 
 and complete sentences are handed on while the stream is still running, so
-speech starts early. A refusal is an error (llm_refused), and the sentence it
-cut off is not spoken. A server-side fallback needs nothing special: streamed,
-the model that takes over continues from the partial text (a decline before any
-output is seamless), so the streamed text is the answer either way.
+speech starts early. A filtered answer is an error (llm_refused), and the
+sentence it cut off is not spoken. Interrupted streams are errors too.
 
 Nothing here logs or stores question or answer text; History keeps the last
 few exchanges in memory for a few minutes only (forget_old() drops them on
 time even when nobody asks again).
 """
 import collections
+import os
 import re
 import threading
 import time
 import unicodedata
 
 try:
-    import anthropic
+    import openai
 except ImportError:  # the band works without the SDK; questions get no_api_key
-    anthropic = None
+    openai = None
 
-MODEL = "claude-opus-5-5"
-EFFORT = "low"
+MODEL = "deepseek-flash"
+EFFORT = "none"
+BASE_URL = "https://api.deepseek.com"
 MAX_TOKENS = 4000
-FALLBACK_BETA = "server-side-fallback-2026-07-01"
 TIMEOUT = 60.0
 MAX_RETRIES = 2
 MAX_ANSWER = 400
@@ -228,10 +227,13 @@ class History:
 
 
 def default_client(timeout=TIMEOUT):
-    if anthropic is None:
-        raise RuntimeError("the anthropic SDK is not installed")
-    # credentials come from the environment (ANTHROPIC_API_KEY, or an ant profile)
-    return anthropic.Anthropic(timeout=timeout, max_retries=MAX_RETRIES)
+    if openai is None:
+        raise RuntimeError("the openai SDK is not installed")
+    # Always select DeepSeek explicitly; never fall back to OPENAI_API_KEY.
+    key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+    if not key:
+        raise RuntimeError("DEEPSEEK_API_KEY is not configured")
+    return openai.OpenAI(api_key=key, base_url=BASE_URL, timeout=timeout, max_retries=MAX_RETRIES)
 
 
 class Oracle:
@@ -246,7 +248,6 @@ class Oracle:
         client_factory=None,
         model=MODEL,
         effort=EFFORT,
-        fallbacks=True,
         max_tokens=MAX_TOKENS,
         log=print,
     ):
@@ -259,7 +260,6 @@ class Oracle:
         self.client_factory = client_factory or default_client
         self.model = model
         self.effort = effort
-        self.fallbacks = fallbacks
         self.max_tokens = max_tokens
         self.log = log
         self.lock = threading.Lock()
@@ -278,17 +278,14 @@ class Oracle:
             return self.client
 
     def request(self, question, history=()):
-        kwargs = {
+        return {
             "model": self.model,
             "max_tokens": self.max_tokens,
-            "output_config": {"effort": self.effort},
-            "system": [{"type": "text", "text": self.system_prompt(), "cache_control": {"type": "ephemeral"}}],
-            "messages": list(history) + [{"role": "user", "content": question}],
+            "reasoning_effort": self.effort,
+            "stream": True,
+            "messages": [{"role": "system", "content": self.system_prompt()}]
+            + list(history) + [{"role": "user", "content": question}],
         }
-        if self.fallbacks:
-            kwargs["betas"] = [FALLBACK_BETA]
-            kwargs["fallbacks"] = "default"
-        return kwargs
 
     def _failed(self, exc, status=None, hint=""):
         # the class and status only: messages can quote the request
@@ -308,38 +305,41 @@ class Oracle:
                 for sentence in sentences:
                     on_sentence(sentence)
 
+        finish_reason = None
+        refused = False
         try:
-            with client.beta.messages.stream(**self.request(question, history)) as stream:
-                for delta in stream.text_stream:
-                    publish(parsed.feed(delta))
-                message = stream.get_final_message()
-        except anthropic.CredentialsError as exc:
-            self.log("earendil: no model credentials (%s)" % type(exc).__name__)
-            raise OracleError("no_api_key") from None
-        except anthropic.AuthenticationError as exc:
+            with client.chat.completions.create(**self.request(question, history)) as stream:
+                for chunk in stream:
+                    for choice in chunk.choices:
+                        if choice.index != 0:
+                            continue
+                        # Thinking is a separate channel, never an answer to speak.
+                        delta = choice.delta
+                        if getattr(delta, "refusal", None):
+                            refused = True
+                        if delta.content:
+                            publish(parsed.feed(delta.content))
+                        if choice.finish_reason is not None:
+                            finish_reason = choice.finish_reason
+        except openai.AuthenticationError as exc:
             raise self._failed(exc, exc.status_code, " (the API key was rejected)") from None
-        except anthropic.RateLimitError as exc:
+        except openai.RateLimitError as exc:
             raise self._failed(exc, exc.status_code, " (rate limited)") from None
-        except anthropic.APIStatusError as exc:
+        except openai.APIStatusError as exc:
             raise self._failed(exc, exc.status_code) from None
-        except anthropic.APIConnectionError as exc:
+        except openai.APIConnectionError as exc:
             raise self._failed(exc) from None
-        except anthropic.APIError as exc:
+        except openai.APIError as exc:
             raise self._failed(exc) from None
-        except TypeError as exc:
-            # the SDK found neither an API key nor a token before sending
-            if "authentication" not in str(exc):
-                raise
-            self.log("earendil: no model credentials")
-            raise OracleError("no_api_key") from None
-        if message.stop_reason == "refusal":
+        if refused or finish_reason == "content_filter":
             # before the tail is flushed: a refused partial is incomplete, not to be spoken
             self.log("earendil: the model declined")
             raise OracleError("llm_refused")
+        if finish_reason != "stop":
+            self.log("earendil: model stream did not finish")
+            raise OracleError("llm_failed")
         publish(parsed.finish())
 
-        if any(getattr(block, "type", None) == "fallback" for block in getattr(message, "content", None) or []):
-            self.log("earendil: answered by a fallback model")
         if not parsed.answer:
             self.log("earendil: the model gave no answer")
             raise OracleError("llm_failed")

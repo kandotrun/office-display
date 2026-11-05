@@ -2,7 +2,7 @@
 """earendil: the values band and the voice consultation agent of the 2F display.
 
 Listens to speech's captions for the wake phrase (エンデルヒール, as Vosk hears
-it), asks Claude what Earendil would do, speaks the answer and publishes the
+it), asks DeepSeek what Earendil would do, speaks the answer and publishes the
 state for photo-frame-rs on loopback:
 
     GET  /status        the conversation (state, question, answer, voice levels, ...)
@@ -19,7 +19,7 @@ state for photo-frame-rs on loopback:
 emblem and the original values page load in the background and retry.
 
 Privacy: audio never reaches this process. Only the transcribed text of an
-utterance that holds the wake phrase is sent to the Anthropic API; questions
+utterance that holds the wake phrase is sent to the DeepSeek API; questions
 and answers live in memory (the last 3 exchanges, for 3 minutes) and are never
 logged or written to disk. Logs carry state names, error codes and backend
 names only.
@@ -34,11 +34,10 @@ Environment:
     EARENDIL_VALUES_URL         https://earendil.com/values/ (page text for the model, daily)
     EARENDIL_EMBLEM_URL         https://earendil.com/static/earendil-emblem.svg, or a local path
     EARENDIL_CACHE_DIR          ~/.cache/earendil (the emblem SVG and the page text)
-    EARENDIL_MODEL              claude-opus-5-5
-    EARENDIL_EFFORT             low
-    EARENDIL_FALLBACKS          default (server-side refusal fallbacks), or none
+    EARENDIL_MODEL              deepseek-flash
+    EARENDIL_EFFORT             none (or low, high, max)
     EARENDIL_LLM_TIMEOUT        60 (seconds per request, retried twice by the SDK)
-    ANTHROPIC_API_KEY           read by the SDK (or an `ant auth login` profile);
+    DEEPSEEK_API_KEY            read from the environment;
                                 without credentials questions end in no_api_key
     EARENDIL_TTS                auto | voicevox | openjtalk | say | none
     EARENDIL_VOICEVOX_URL       http://127.0.0.1:50021 (must be on this machine: the sentence is in the URL)
@@ -79,7 +78,6 @@ EMBLEM_URL = os.environ.get("EARENDIL_EMBLEM_URL", "https://earendil.com/static/
 CACHE_DIR = os.path.expanduser(os.environ.get("EARENDIL_CACHE_DIR", "~/.cache/earendil"))
 MODEL = os.environ.get("EARENDIL_MODEL", oracle.MODEL)
 EFFORT = os.environ.get("EARENDIL_EFFORT", oracle.EFFORT)
-FALLBACKS = os.environ.get("EARENDIL_FALLBACKS", "default").strip().lower() != "none"
 LLM_TIMEOUT = float(os.environ.get("EARENDIL_LLM_TIMEOUT", "60"))
 TTS = os.environ.get("EARENDIL_TTS", "auto").strip().lower()
 VOICEVOX_URL = os.environ.get("EARENDIL_VOICEVOX_URL", voice.VOICEVOX_URL)
@@ -123,7 +121,6 @@ class Earendil:
         client_factory=None,
         model=MODEL,
         effort=EFFORT,
-        fallbacks=FALLBACKS,
         speaker=None,
         spawn=spawn_thread,
         listen_seconds=LISTEN_SECONDS,
@@ -159,7 +156,6 @@ class Earendil:
             client_factory=client_factory or (lambda: oracle.default_client(LLM_TIMEOUT)),
             model=model,
             effort=effort,
-            fallbacks=fallbacks,
             log=log,
         )
         self.conversation = conversation.Conversation(

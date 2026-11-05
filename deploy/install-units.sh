@@ -71,8 +71,8 @@ tar cf - -C stats . | $SSH "tar xf - -C $HOME_DIR/office-stats"
 $SSH "mkdir -p $HOME_DIR/atlas"
 tar cf - --exclude=./tests --exclude=__pycache__ --exclude=.pytest_cache -C atlas . | $SSH "tar xf - -C $HOME_DIR/atlas"
 
-# earendil (values band + voice agent; talks to the Anthropic API and earendil.com).
-# Its virtualenv holds the anthropic SDK. The API key lives in earendil.env on
+# earendil (values band + voice agent; talks to the DeepSeek API and earendil.com).
+# Its virtualenv holds the OpenAI-compatible SDK. The API key lives in earendil.env on
 # the display (mode 0600), which this script never touches.
 $SSH "mkdir -p $HOME_DIR/earendil"
 tar cf - --exclude=./tests --exclude=__pycache__ --exclude=.pytest_cache --exclude=./.venv --exclude=./earendil.env -C earendil . | $SSH "tar xf - -C $HOME_DIR/earendil"
@@ -99,5 +99,5 @@ $SSH "sudo systemctl enable --now atlas.service earendil.service && \
       sudo systemctl try-restart atlas.service earendil.service speech.service"
 
 echo "installed. atlas, earendil and speech restarted; X session changes apply on the next reboot."
-echo "earendil answers only once $HOME_DIR/earendil/earendil.env holds ANTHROPIC_API_KEY (chmod 600)."
+echo "earendil answers only once $HOME_DIR/earendil/earendil.env holds DEEPSEEK_API_KEY (chmod 600)."
 echo "The photo frame starts from $APP_ROOT/current/bin — run build-and-deploy.sh first."

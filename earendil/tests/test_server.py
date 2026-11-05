@@ -7,7 +7,6 @@ import socket
 import threading
 import time
 
-import anthropic
 import pytest
 
 import earendil_server as srv
@@ -79,7 +78,7 @@ class Speech:
 
 
 def no_key():
-    raise anthropic.AnthropicError("no credentials")
+    raise RuntimeError("no credentials")
 
 
 def make(tmp_path, fetch=None, speech=None, client=None, factory=no_key, spawn=None, **kw):
@@ -148,7 +147,7 @@ def test_health(served):
     _, _, port = served
     status, _, doc = request(port, "GET", "/health")
     assert status == 200
-    assert doc == {"ok": True, "speech": None, "emblem": False, "source": False, "tts": "none", "model": "claude-opus-5-5"}
+    assert doc == {"ok": True, "speech": None, "emblem": False, "source": False, "tts": "none", "model": "deepseek-flash"}
 
 
 def test_unknown_paths(served):
@@ -278,8 +277,9 @@ def test_a_whole_answer_with_history(tmp_path):
     app.conversation.tick()
     app.conversation.ask("じゃあ明日は？")
     second = client.calls[1]["messages"]
-    assert second[0] == {"role": "user", "content": QUESTION}
-    assert second[1] == {"role": "assistant", "content": "[We not I, Family First]\n" + ANSWER}
+    assert second[0]["role"] == "system"
+    assert second[1] == {"role": "user", "content": QUESTION}
+    assert second[2] == {"role": "assistant", "content": "[We not I, Family First]\n" + ANSWER}
     assert second[-1] == {"role": "user", "content": "じゃあ明日は?"}  # NFKC, like the captions
     assert all("徹夜" not in line and "明日" not in line for line in logs)
 
@@ -370,14 +370,17 @@ def test_defaults(monkeypatch):
         assert mod.SPEECH_URL == "http://127.0.0.1:8098/status"
         assert mod.VALUES_URL == "https://earendil.com/values/"
         assert mod.EMBLEM_URL == "https://earendil.com/static/earendil-emblem.svg"
-        assert (mod.MODEL, mod.EFFORT, mod.FALLBACKS) == ("claude-opus-5-5", "low", True)
+        assert (mod.MODEL, mod.EFFORT) == ("deepseek-flash", "none")
         assert (mod.LISTEN_SECONDS, mod.HOLD_SECONDS) == (8.0, 25.0)
         assert (mod.TTS, mod.VOICEVOX_SPEAKER, mod.AUDIO_OUT) == ("auto", 13, "default")
         assert mod.PERSONA == "エンデルヒール"
-        monkeypatch.setenv("EARENDIL_FALLBACKS", "none")
-        assert importlib.reload(srv).FALLBACKS is False
+        monkeypatch.setenv("EARENDIL_MODEL", "deepseek-v4-pro")
+        monkeypatch.setenv("EARENDIL_EFFORT", "high")
+        configured = importlib.reload(srv)
+        assert (configured.MODEL, configured.EFFORT) == ("deepseek-v4-pro", "high")
     finally:
-        monkeypatch.delenv("EARENDIL_FALLBACKS", raising=False)
+        monkeypatch.delenv("EARENDIL_MODEL", raising=False)
+        monkeypatch.delenv("EARENDIL_EFFORT", raising=False)
         importlib.reload(srv)
 
 

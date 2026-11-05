@@ -255,8 +255,7 @@ Earendil Inc. の [Values](https://earendil.com/values/) を常に画面に出�
 
 ### 答え
 
-- Claude（`claude-opus-5-5`、effort `low`、ストリーミング）に、Values の要約と原文を前提として渡します。答えは2〜4文の話し言葉で「エンデルヒールなら、」から始まります。人格の指示は `earendil/persona.md` にあります
-- サーバー側のフォールバック（`fallbacks: "default"`）を有効にしています。安全分類器が断ったときは別のモデルが続きを答えます（`EARENDIL_FALLBACKS=none` で無効）
+- DeepSeek API（`deepseek-flash`、reasoning effort `none`、ストリーミング）に、Values の要約と原文を前提として渡します。答えは2〜4文の話し言葉で「エンデルヒールなら、」から始まります。人格の指示は `earendil/persona.md` にあります
 - 文が出来上がるたびに読み上げへ回すので、答えを書き終える前に話し始めます
 - 続けて聞けるよう、直近3往復を3分間だけメモリに持ちます
 
@@ -278,7 +277,7 @@ VOICEVOX ENGINE は読み上げる文を URL に載せて受け取るので、�
 | 相手 | 内容 | 頻度 |
 |---|---|---|
 | earendil.com | ロゴの SVG（`EARENDIL_EMBLEM_URL`。ローカルのパスも可）と Values のページ本文 | 起動時と1日1回。`/var/cache/earendil` にキャッシュ |
-| Anthropic API | 呼びかけを含む発話の書き起こし（質問）と直近の会話 | 呼びかけられたときだけ |
+| DeepSeek API（`https://api.deepseek.com`） | 呼びかけを含む発話の書き起こし（質問）と直近の会話 | 呼びかけられたときだけ |
 
 - **音声はこの機械から出ません**。送るのは書き起こした文字だけです
 - 質問と答えはログにもディスクにも残しません。ログには状態名とエラーの種類だけを出します
@@ -291,7 +290,8 @@ API キーは表示機の `~/earendil/earendil.env`（`chmod 600`、リポジト
 ```sh
 # 表示機で
 cat > ~/earendil/earendil.env <<'EOF'
-ANTHROPIC_API_KEY=...
+DEEPSEEK_API_KEY=...
+EARENDIL_MODEL=deepseek-flash
 # EARENDIL_TTS=openjtalk
 EOF
 chmod 600 ~/earendil/earendil.env
@@ -301,7 +301,7 @@ sudo systemctl restart earendil
 | 変数 | 既定 | 意味 |
 |---|---|---|
 | `EARENDIL_PERSONA` | `エンデルヒール` | 呼び名（答えの書き出しと画面の名前） |
-| `EARENDIL_MODEL` / `EARENDIL_EFFORT` | `claude-opus-5-5` / `low` | モデルと考える深さ |
+| `EARENDIL_MODEL` / `EARENDIL_EFFORT` | `deepseek-flash` / `none` | モデルと推論の深さ（`none`・`low`・`high`・`max`） |
 | `EARENDIL_EMBLEM_URL` | earendil.com のロゴ | 別のロゴにしたいときは SVG の URL かパス |
 | `EARENDIL_LISTEN_SECONDS` / `EARENDIL_HOLD_SECONDS` | `8` / `25` | 名前だけのあと質問を待つ秒数 / 答えを出しておく秒数 |
 
@@ -360,7 +360,7 @@ export APP_ROOT=/home/$DISPLAY_USER/photo-frame-rs
 `install-units.sh` は次を行います。
 
 1. `atlas/`・`survey/`・`speech/`・`stats/`・`presence/`・`earendil/` を表示機へコピー（`earendil.env` には触れない）
-2. `~/earendil/.venv` を作り、`anthropic` SDK を入れる（Debian/Ubuntu では `python3-venv` が要る）
+2. `~/earendil/.venv` を作り、DeepSeek の OpenAI 互換 API を呼ぶための `openai` SDK を入れる（Debian/Ubuntu では `python3-venv` が要る）
 3. systemd ユニットを描画して設置（`ATLAS_*` と `AUDIO_OUT` はここでユニットに入る）
 4. 有効化し、`atlas`・`earendil` は起動・再起動、`speech` は再起動して新しいコードを反映
 
@@ -401,7 +401,7 @@ ssh "$DISPLAY_USER@$DISPLAY_HOST" '
 
 ## 方針
 
-- **認証情報を置かない** — アプリはループバックのHTTPを読むだけで、トークンもAPIキーも持ちません。Anthropic API のキーは表示機の `~/earendil/earendil.env`（`chmod 600`）にだけあり、`earendil` だけが読みます。
+- **認証情報を置かない** — アプリはループバックのHTTPを読むだけで、トークンもAPIキーも持ちません。DeepSeek API のキーは表示機の `~/earendil/earendil.env`（`chmod 600`）にだけあり、`earendil` だけが読みます。
 - **写真を同梱しない** — 画像は実行時に取得します。
 - **外へ出るのは atlas と earendil だけ**（このリポジトリの中では）
   - `atlas` は公開データ（地図・気象・衛星画像）を取りに行くだけで、送るのはタイル座標と丸めた撮影地の座標だけです。写真名はログにもディスクにも残しません

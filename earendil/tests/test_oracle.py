@@ -5,12 +5,12 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 
-import anthropic
+import openai
 import pytest
 
 import oracle
 import values
-from fakes import FakeClient, final
+from fakes import FakeClient, stream_chunk
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TITLES = [v["title"] for v in values.load(os.path.join(HERE, "values.json"))["values"]]
@@ -193,29 +193,27 @@ def test_the_request_shape():
     client = FakeClient(CHUNKS)
     o, _ = make(client)
     history = [{"role": "user", "content": "前の質問"}, {"role": "assistant", "content": "[]\n前の答え"}]
-    o.ask("締め切り前に徹夜するのってどう思う", history)
+    question = "締め切り前に徹夜するのってどう思う"
+    o.ask(question, history)
     (call,) = client.calls
-    assert call["model"] == "claude-opus-5-5"
-    assert call["max_tokens"] == 4000
-    assert call["output_config"] == {"effort": "low"}
-    assert call["betas"] == ["server-side-fallback-2026-07-01"]
-    assert call["fallbacks"] == "default"
-    (system,) = call["system"]
-    assert system["type"] == "text" and system["cache_control"] == {"type": "ephemeral"}
-    assert system["text"] == o.system_prompt()
-    assert "Our Values" in system["text"]
-    assert call["messages"] == history + [{"role": "user", "content": "締め切り前に徹夜するのってどう思う"}]
-    for banned in ("temperature", "top_p", "top_k", "thinking"):
-        assert banned not in call
+    assert call == {
+        "model": "deepseek-flash",
+        "max_tokens": 4000,
+        "reasoning_effort": "none",
+        "stream": True,
+        "messages": [{"role": "system", "content": o.system_prompt()}] + history + [{"role": "user", "content": question}],
+    }
+    assert "Our Values" in call["messages"][0]["content"]
+    assert client.last_stream.closed
 
 
-def test_model_effort_and_fallbacks_are_configurable():
+@pytest.mark.parametrize("effort", ["none", "low", "high", "max"])
+def test_model_and_effort_are_configurable(effort):
     client = FakeClient(CHUNKS)
-    o, _ = make(client, model="claude-sonnet-5-5", effort="medium", fallbacks=False)
+    o, _ = make(client, model="deepseek-v4-pro", effort=effort)
     o.ask("q")
     (call,) = client.calls
-    assert call["model"] == "claude-sonnet-5-5" and call["output_config"] == {"effort": "medium"}
-    assert "betas" not in call and "fallbacks" not in call
+    assert call["model"] == "deepseek-v4-pro" and call["reasoning_effort"] == effort
 
 
 def test_callbacks_follow_the_stream():
@@ -229,61 +227,51 @@ def test_callbacks_follow_the_stream():
     assert updates[-1] == (ANSWER, ["We not I", "Family First"])
 
 
-def test_a_refusal_is_an_error():
-    client = FakeClient(["[]\n途中まで"], message=final("[]\n途中まで", stop_reason="refusal"))
-    o, logs = make(client)
-    with pytest.raises(oracle.OracleError) as info:
-        o.ask("q")
-    assert info.value.code == "llm_refused"
-    assert all("途中" not in line and "q" != line for line in logs)
+def test_reasoning_role_and_usage_chunks_never_reach_the_screen_or_voice():
+    chunks = [
+        stream_chunk(reasoning_content="秘密の思考。"),
+        stream_chunk(),
+        SimpleNamespace(choices=[]),
+        stream_chunk(content="別候補。", index=1),
+        *CHUNKS,
+    ]
+    o, logs = make(FakeClient(chunks))
+    updates, sentences = [], []
+    result = o.ask("秘密の質問", on_update=lambda a, t: updates.append(a), on_sentence=sentences.append)
+    assert result.text == ANSWER
+    assert len(updates) == len(CHUNKS) + 1
+    assert "".join(sentences) == ANSWER
+    assert not any("秘密" in line or "別候補" in line for line in updates + sentences + logs)
 
 
 def test_a_refusal_does_not_speak_the_sentence_it_cut_off():
-    # sentences finished while streaming are already spoken; the unfinished tail is not
     chunks = ["[We not I]\n休もう。", "エンデルヒールなら、まず"]
-    client = FakeClient(chunks, message=final("".join(chunks), stop_reason="refusal"))
-    o, _ = make(client)
+    client = FakeClient(chunks, finish_reason="content_filter")
+    o, logs = make(client)
+    sentences = []
+    with pytest.raises(oracle.OracleError) as info:
+        o.ask("秘密の質問", on_sentence=sentences.append)
+    assert info.value.code == "llm_refused"
+    assert sentences == ["休もう。"]
+    assert client.last_stream.closed
+    assert all("秘密" not in line and "エンデルヒールなら" not in line for line in logs)
+
+
+def test_a_refusal_delta_is_an_error():
+    o, _ = make(FakeClient([stream_chunk(refusal="Cannot help")]))
+    with pytest.raises(oracle.OracleError) as info:
+        o.ask("q")
+    assert info.value.code == "llm_refused"
+
+
+@pytest.mark.parametrize("finish_reason", [None, "length", "aborted", "insufficient_system_resource", "tool_calls"])
+def test_an_interrupted_stream_does_not_speak_the_unfinished_tail(finish_reason):
+    o, _ = make(FakeClient(["[]\n休もう。まずは"], finish_reason=finish_reason))
     sentences = []
     with pytest.raises(oracle.OracleError) as info:
         o.ask("q", on_sentence=sentences.append)
-    assert info.value.code == "llm_refused"
+    assert info.value.code == "llm_failed"
     assert sentences == ["休もう。"]
-
-
-FALLBACK = SimpleNamespace(type="fallback")
-CONTINUED = "エンデルヒールなら、まず徹夜しなくて済む方法をみんなで探すよ。"
-
-
-def test_a_mid_stream_fallback_continues_the_partial_answer():
-    # the fallback model continues from the partial text (only its text blocks are
-    # passed on), and text_stream carries both halves: together they are the answer
-    content = [
-        SimpleNamespace(type="thinking", thinking="", signature="s"),
-        SimpleNamespace(type="text", text="[We not I]\nエンデルヒールなら、まず徹夜"),
-        FALLBACK,
-        SimpleNamespace(type="text", text="しなくて済む方法をみんなで探すよ。"),
-    ]
-    streamed = ["[We not I]\nエンデルヒールなら、まず徹夜", "しなくて済む方法をみんなで探すよ。"]
-    o, logs = make(FakeClient(streamed, message=final(content=content)))
-    updates, sentences = [], []
-    result = o.ask("q", on_update=lambda a, t: updates.append((a, list(t))), on_sentence=sentences.append)
-    assert result == oracle.Answer(CONTINUED, ["We not I"])
-    assert updates[-1] == (CONTINUED, ["We not I"])
-    assert sentences == [CONTINUED]
-    assert any("fallback" in line for line in logs)
-    assert all("徹夜" not in line for line in logs)
-
-
-def test_several_fallbacks_still_make_one_answer():
-    content = [
-        SimpleNamespace(type="text", text="[We not I]\nみんなで"),
-        FALLBACK,
-        SimpleNamespace(type="text", text="考えて"),
-        FALLBACK,
-        SimpleNamespace(type="text", text="みよう。"),
-    ]
-    o, _ = make(FakeClient(["[We not I]\nみんなで", "考えて", "みよう。"], message=final(content=content)))
-    assert o.ask("q") == oracle.Answer("みんなで考えてみよう。", ["We not I"])
 
 
 def test_an_empty_answer_is_a_failure():
@@ -295,24 +283,17 @@ def test_an_empty_answer_is_a_failure():
 
 def test_no_client_means_no_api_key():
     def factory():
-        raise anthropic.AnthropicError("no credentials")
+        raise RuntimeError("no credentials: test-private-sdk-key")
 
     o, logs = make(factory=factory)
     with pytest.raises(oracle.OracleError) as info:
         o.ask("q")
     assert info.value.code == "no_api_key"
     assert logs
+    assert all("test-private-sdk-key" not in line for line in logs)
 
 
-def test_unresolved_credentials_mean_no_api_key():
-    error = TypeError('"Could not resolve authentication method. Expected one of api_key, auth_token, ..."')
-    o, _ = make(FakeClient(error=error))
-    with pytest.raises(oracle.OracleError) as info:
-        o.ask("q")
-    assert info.value.code == "no_api_key"
-
-
-def test_other_type_errors_are_bugs_not_missing_keys():
+def test_type_errors_are_bugs_not_missing_keys():
     o, _ = make(FakeClient(error=TypeError("unexpected keyword")))
     with pytest.raises(TypeError):
         o.ask("q")
@@ -331,55 +312,38 @@ def test_the_client_is_built_once():
     assert built == [1]
 
 
+def test_default_client_always_selects_deepseek(monkeypatch):
+    calls = []
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-deepseek")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-other-provider")
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://wrong-provider.invalid")
+    monkeypatch.setattr(openai, "OpenAI", lambda **kw: calls.append(kw) or object())
+    oracle.default_client(timeout=12)
+    assert calls == [{"api_key": "test-deepseek", "base_url": "https://api.deepseek.com", "timeout": 12, "max_retries": 2}]
+
+
 # -- the real SDK against a local fake API -------------------------------------------------
 
 
-def sse(*events):
-    out = []
-    for event in events:
-        out.append("event: %s\ndata: %s\n\n" % (event["type"], json.dumps(event, ensure_ascii=False)))
-    return "".join(out).encode()
-
-
-def message_start(model="claude-opus-5-5"):
+def chunk_event(content=None, reasoning_content=None, finish_reason=None):
+    delta = {}
+    if content is not None:
+        delta["content"] = content
+    if reasoning_content is not None:
+        delta["reasoning_content"] = reasoning_content
     return {
-        "type": "message_start",
-        "message": {
-            "id": "msg_test",
-            "type": "message",
-            "role": "assistant",
-            "model": model,
-            "content": [],
-            "stop_reason": None,
-            "stop_sequence": None,
-            "usage": {"input_tokens": 1800, "output_tokens": 1, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0},
-        },
+        "id": "chatcmpl_test", "object": "chat.completion.chunk", "created": 1800000000,
+        "model": "deepseek-flash",
+        "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
     }
 
 
-def text_deltas(index, pieces):
-    events = [{"type": "content_block_start", "index": index, "content_block": {"type": "text", "text": ""}}]
-    events += [{"type": "content_block_delta", "index": index, "delta": {"type": "text_delta", "text": p}} for p in pieces]
-    events.append({"type": "content_block_stop", "index": index})
-    return events
-
-
-THINKING = [
-    {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": "", "signature": ""}},
-    {"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "EqQBCkgIBxABGAIiQL"}},
-    {"type": "content_block_stop", "index": 0},
-]
-
-
-def ending(stop_reason="end_turn", stop_details=None):
-    delta = {"stop_reason": stop_reason, "stop_sequence": None}
-    if stop_details is not None:
-        delta["stop_details"] = stop_details
-    return [{"type": "message_delta", "delta": delta, "usage": {"output_tokens": 61}}, {"type": "message_stop"}]
+def sse(*events):
+    return ("".join("data: %s\n\n" % json.dumps(event, ensure_ascii=False) for event in events) + "data: [DONE]\n\n").encode()
 
 
 class FakeAPI:
-    """Just enough of POST /v1/messages: records requests, answers with canned bodies."""
+    """POST /chat/completions: records requests, answers with canned DeepSeek SSE."""
 
     def __init__(self, body, status=200, ctype="text/event-stream"):
         self.body, self.status, self.ctype = body, status, ctype
@@ -398,7 +362,6 @@ class FakeAPI:
                 self.send_response(api.status)
                 self.send_header("Content-Type", api.ctype)
                 self.send_header("Content-Length", str(len(api.body)))
-                self.send_header("request-id", "req_test")
                 self.end_headers()
                 self.wfile.write(api.body)
 
@@ -419,100 +382,50 @@ def no_proxy(monkeypatch):
 
 
 def real_client(url):
-    return anthropic.Anthropic(base_url=url, api_key="test", max_retries=0, timeout=10)
+    return openai.OpenAI(base_url=url, api_key="test", max_retries=0, timeout=10)
 
 
-def test_the_real_sdk_streams_a_tagged_answer(no_proxy):
+def test_the_real_sdk_streams_a_tagged_answer_without_reasoning(no_proxy):
     pieces = ["[We not I, Fami", "ly First]\nエンデルヒールなら、", "まず徹夜しなくて済む方法をチームで探すよ。", "今日は30分だけ早く相談してみよう！"]
-    api = FakeAPI(sse(message_start(), *THINKING, *text_deltas(1, pieces), *ending()))
+    events = [chunk_event(), chunk_event(reasoning_content="秘密の思考。")]
+    events += [chunk_event(content=p) for p in pieces]
+    events.append(chunk_event(finish_reason="stop"))
+    api = FakeAPI(sse(*events))
     try:
-        o, _ = make(real_client(api.url))
+        o, logs = make(real_client(api.url))
         sentences = []
         result = o.ask("締め切り前に徹夜するのってどう思う", on_sentence=sentences.append)
     finally:
         api.close()
     assert result == oracle.Answer(ANSWER, ["We not I", "Family First"])
     assert sentences == ["エンデルヒールなら、まず徹夜しなくて済む方法をチームで探すよ。", "今日は30分だけ早く相談してみよう！"]
+    assert not any("秘密" in line for line in logs + sentences)
     (req,) = api.requests
-    assert req["path"].split("?")[0] == "/v1/messages"
+    assert req["path"] == "/chat/completions"
     headers = {k.lower(): v for k, v in req["headers"].items()}
-    assert "server-side-fallback-2026-07-01" in headers["anthropic-beta"]
-    # this SDK sends the key as a bearer token; older ones used x-api-key
-    assert headers.get("authorization") == "Bearer test" or headers.get("x-api-key") == "test"
+    assert headers["authorization"] == "Bearer test"
+    assert "anthropic-beta" not in headers
     body = req["body"]
-    assert body["model"] == "claude-opus-5-5"
-    assert body["max_tokens"] == 4000
-    assert body["output_config"] == {"effort": "low"}
-    assert body["fallbacks"] == "default"
-    assert body["stream"] is True
-    assert body["system"][0]["cache_control"] == {"type": "ephemeral"}
-    assert body["messages"] == [{"role": "user", "content": "締め切り前に徹夜するのってどう思う"}]
-    for banned in ("temperature", "top_p", "top_k", "thinking"):
-        assert banned not in body
+    assert body == o.request("締め切り前に徹夜するのってどう思う")
 
 
-def test_the_real_sdk_refusal(no_proxy):
-    details = {"type": "refusal", "category": "cyber", "explanation": None}
-    api = FakeAPI(sse(message_start(), *THINKING, *text_deltas(1, ["[]\n途中"]), *ending("refusal", details)))
-    try:
-        o, _ = make(real_client(api.url))
-        with pytest.raises(oracle.OracleError) as info:
-            o.ask("q")
-    finally:
-        api.close()
-    assert info.value.code == "llm_refused"
-
-
-def test_the_real_sdk_pre_output_fallback(no_proxy):
-    fallback = {
-        "type": "content_block_start",
-        "index": 0,
-        "content_block": {
-            "type": "fallback",
-            "from": {"model": "claude-opus-5-5"},
-            "to": {"model": "claude-opus-5"},
-            "trigger": {"type": "refusal", "category": "cyber"},
-        },
-    }
-    events = [message_start("claude-opus-5"), fallback, {"type": "content_block_stop", "index": 0}]
-    events += text_deltas(1, ["[Be Charming]\n", "笑顔でいこう。"]) + ending()
-    api = FakeAPI(sse(*events))
-    try:
-        o, _ = make(real_client(api.url))
-        result = o.ask("q")
-    finally:
-        api.close()
-    assert result == oracle.Answer("笑顔でいこう。", ["Be Charming"])
-
-
-def test_the_real_sdk_mid_stream_fallback(no_proxy):
-    fallback = {
-        "type": "content_block_start",
-        "index": 2,
-        "content_block": {
-            "type": "fallback",
-            "from": {"model": "claude-opus-5-5"},
-            "to": {"model": "claude-opus-5"},
-            "trigger": {"type": "refusal", "category": "cyber"},
-        },
-    }
-    events = [message_start(), *THINKING, *text_deltas(1, ["[We not I]\n", "エンデルヒールなら、まず徹夜"])]
-    events += [fallback, {"type": "content_block_stop", "index": 2}]
-    events += text_deltas(3, ["しなくて済む方法を", "みんなで探すよ。"]) + ending()
-    api = FakeAPI(sse(*events))
+@pytest.mark.parametrize("finish_reason,code", [("content_filter", "llm_refused"), ("aborted", "llm_failed"), (None, "llm_failed")])
+def test_the_real_sdk_rejects_filtered_or_incomplete_answers(no_proxy, finish_reason, code):
+    api = FakeAPI(sse(chunk_event(content="[]\n途中"), chunk_event(finish_reason=finish_reason)))
     try:
         o, _ = make(real_client(api.url))
         sentences = []
-        result = o.ask("q", on_sentence=sentences.append)
+        with pytest.raises(oracle.OracleError) as info:
+            o.ask("q", on_sentence=sentences.append)
     finally:
         api.close()
-    assert result == oracle.Answer(CONTINUED, ["We not I"])
-    assert sentences == [CONTINUED]
+    assert info.value.code == code
+    assert sentences == []
 
 
-@pytest.mark.parametrize("status", [400, 401, 429, 500, 529])
-def test_the_real_sdk_api_errors_are_llm_failed(no_proxy, status):
-    body = json.dumps({"type": "error", "error": {"type": "api_error", "message": "boom"}}).encode()
+@pytest.mark.parametrize("status", [400, 401, 402, 403, 429, 500, 503])
+def test_the_real_sdk_api_errors_are_llm_failed_and_private(no_proxy, status):
+    body = json.dumps({"error": {"type": "api_error", "message": "秘密の質問を含むboom Authorization: Bearer test"}}).encode()
     api = FakeAPI(body, status=status, ctype="application/json")
     try:
         o, logs = make(real_client(api.url))
@@ -523,6 +436,21 @@ def test_the_real_sdk_api_errors_are_llm_failed(no_proxy, status):
     assert info.value.code == "llm_failed"
     assert any(str(status) in line for line in logs)
     assert not any("秘密" in line or "boom" in line for line in logs)
+    assert all("Bearer test" not in line and "authorization" not in line.lower() for line in logs)
+
+
+def test_the_real_sdk_stream_error_does_not_speak_the_tail(no_proxy):
+    api = FakeAPI(sse(chunk_event(content="[]\n途中"), {"error": {"message": "秘密のエラー", "type": "server_error"}}))
+    try:
+        o, logs = make(real_client(api.url))
+        sentences = []
+        with pytest.raises(oracle.OracleError) as info:
+            o.ask("q", on_sentence=sentences.append)
+    finally:
+        api.close()
+    assert info.value.code == "llm_failed"
+    assert sentences == []
+    assert all("秘密" not in line for line in logs)
 
 
 def test_the_real_sdk_connection_errors_are_llm_failed(no_proxy):
@@ -535,17 +463,14 @@ def test_the_real_sdk_connection_errors_are_llm_failed(no_proxy):
     assert info.value.code == "llm_failed"
 
 
-def test_the_real_sdk_without_credentials_is_no_api_key(no_proxy, monkeypatch, tmp_path):
-    for key in list(os.environ):
-        if key.startswith("ANTHROPIC_"):
-            monkeypatch.delenv(key)
-    monkeypatch.setenv("ANTHROPIC_CONFIG_DIR", str(tmp_path))
-    api = FakeAPI(b"")
-    try:
-        o, _ = make(factory=lambda: anthropic.Anthropic(base_url=api.url, max_retries=0))
-        with pytest.raises(oracle.OracleError) as info:
-            o.ask("q")
-    finally:
-        api.close()
+@pytest.mark.parametrize("key", [None, "", "   "])
+def test_without_deepseek_credentials_is_no_api_key_even_with_openai_key(monkeypatch, key):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-other-provider")
+    if key is None:
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    else:
+        monkeypatch.setenv("DEEPSEEK_API_KEY", key)
+    o, _ = make()
+    with pytest.raises(oracle.OracleError) as info:
+        o.ask("q")
     assert info.value.code == "no_api_key"
-    assert api.requests == []

@@ -20,18 +20,18 @@ The team calls it **エンデルヒール**.
 | Topic | Decision |
 |---|---|
 | Placement | A permanent glass **band** under the photo collage (right column). A conversation expands the band over the collage, then collapses back. The left strip is unchanged. |
-| Service | New loopback service `earendil` (`127.0.0.1:8101`, Python). It listens to `speech`, detects the wake phrase, asks Claude, speaks the answer and publishes state. `photo-frame-rs` only reads it. |
+| Service | New loopback service `earendil` (`127.0.0.1:8101`, Python). It listens to `speech`, detects the wake phrase, asks DeepSeek, speaks the answer and publishes state. `photo-frame-rs` only reads it. |
 | Wake | Fuzzy kana matching on the rough Vosk captions; no second recogniser. Measured: エンデルヒール → 「エンゼル ヒール」 consistently. |
-| LLM | Claude via the official `anthropic` Python SDK, model `claude-opus-5-5`, effort `low`, streamed, server-side `fallbacks: "default"`. Configurable through the environment. |
+| LLM | DeepSeek API via the `openai` Python SDK at `https://api.deepseek.com`, model `deepseek-flash`, reasoning effort `none`, streamed. Configurable through the environment; credentials are read only from `DEEPSEEK_API_KEY`. |
 | Voice | Pluggable TTS: VOICEVOX engine (HTTP), Open JTalk (CLI), macOS `say` (dev) or none (subtitles only). Playback through `aplay`/`afplay`. |
 | Emblem | Not stored in the repository. Fetched at runtime from `EARENDIL_EMBLEM_URL` (default `https://earendil.com/static/earendil-emblem.svg`, or a local path), flattened to polygons by the service and filled by the frame. |
 | Values text | `earendil/values.json`: English titles plus our own Japanese summaries. The original page text is fetched at runtime (daily, cached) and given to the model as reference; it is never committed. |
-| Privacy | Audio never leaves the machine. Only the transcribed text of an utterance that contains the wake phrase is sent to the Anthropic API. Questions and answers are kept in memory only (last few exchanges, a few minutes) and never logged or written to disk. |
+| Privacy | Audio never leaves the machine. Only the transcribed text of an utterance that contains the wake phrase is sent to the DeepSeek API. Questions and answers are kept in memory only (last few exchanges, a few minutes) and never logged or written to disk. |
 
 ## Data flow
 
 ```
- mic ─▶ speech (8098) ──GET /status (phrases, partial)──▶ earendil (8101) ──▶ Anthropic API
+ mic ─▶ speech (8098) ──GET /status (phrases, partial)──▶ earendil (8101) ──▶ DeepSeek API
                                                             │   ▲
                                                             │   └─ VOICEVOX (50021) / open_jtalk / say
                                                             ├─▶ aplay / afplay ─▶ HDMI speakers
@@ -168,16 +168,17 @@ Rules:
 
 ## The model
 
-- `client.beta.messages.stream(model=..., max_tokens=4000,
-  output_config={"effort": "low"}, betas=["server-side-fallback-2026-07-01"],
-  fallbacks="default", system=[...cache_control...], messages=[...])`.
+- `client.chat.completions.create(model="deepseek-flash", max_tokens=4000,
+  reasoning_effort="none", stream=True, messages=[system, ...history, question])`.
+  The client uses `https://api.deepseek.com`; only streamed `delta.content` is
+  displayed and spoken. Any `reasoning_content` is ignored.
 - System prompt: `earendil/persona.md` rendered with the persona name, the
   bundled values and (when fetched) the original page text.
 - History: the last 3 exchanges, if the previous one ended less than 180 s ago;
   older ones are dropped from memory 180 s after the last answer.
 - Output: line 1 is `[Title, Title]` (or `[]`), the rest is the spoken answer.
   Unknown titles are dropped. Answers are cut to 400 chars.
-- `stop_reason == "refusal"` → `error: llm_refused`. API errors →
+- A refusal delta or `finish_reason == "content_filter"` → `error: llm_refused`. API errors →
   `llm_failed`. No key → `no_api_key` (the band keeps working).
 - Sentences (split on 。！？!? and newlines) are handed to the TTS as soon as
   they are complete, so speech starts before the stream ends. Text reaches
@@ -185,8 +186,8 @@ Rules:
   directory, while it plays. The speech and VOICEVOX URLs must be loopback
   (VOICEVOX receives the sentence in its URL; its access log must be
   discarded by whoever runs it).
-- A mid-stream fallback continues from the partial output: the streamed text
-  is the answer.
+- An interrupted stream without a final `finish_reason == "stop"` is an
+  error; its unfinished tail is not spoken.
 
 ## Screen
 

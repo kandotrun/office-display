@@ -21,7 +21,7 @@ test-speech:
     {{py}} --with pytest python -m pytest speech/tests -q
 
 test-earendil:
-    uv run --no-project --with anthropic --with pytest python -m pytest earendil/tests -q
+    uv run --no-project --with openai --with pytest python -m pytest earendil/tests -q
 
 # Generate sample photos (some with GPS) and serve them like photo-manager on :8081
 dev-photos count="12":
@@ -36,9 +36,9 @@ dev-atlas:
 dev-frame *args:
     cd photo-frame-rs && cargo run --release --locked -- --lat {{lat}} --lon {{lon}} {{args}}
 
-# Run the Earendil agent on :8101 (answers need ANTHROPIC_API_KEY; EARENDIL_TTS=say speaks on a Mac)
+# Run the Earendil agent on :8101 (answers need DEEPSEEK_API_KEY; EARENDIL_TTS=say speaks on a Mac)
 dev-earendil:
-    cd earendil && EARENDIL_CACHE_DIR={{scratch}}/earendil-cache uv run --no-project --with anthropic python earendil_server.py
+    cd earendil && EARENDIL_CACHE_DIR={{scratch}}/earendil-cache uv run --no-project --with openai python earendil_server.py
 
 # A scripted stand-in for the agent on :8101 (no key, no microphone), for screen work
 dev-earendil-fake *args:

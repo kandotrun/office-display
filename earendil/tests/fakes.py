@@ -1,4 +1,4 @@
-"""Real-shaped fixtures and stand-ins for the network, the Anthropic client and audio."""
+"""Real-shaped fixtures and stand-ins for the network, the DeepSeek client and audio."""
 import math
 import os
 import stat
@@ -20,49 +20,48 @@ EARENDIL_SVG = (
 ).encode()
 
 
-def final(text=None, stop_reason="end_turn", content=None):
-    """A final message as stream.get_final_message() returns it."""
-    if content is None:
-        content = [SimpleNamespace(type="thinking", thinking="", signature="sig")]
-        if text is not None:
-            content.append(SimpleNamespace(type="text", text=text))
-    return SimpleNamespace(stop_reason=stop_reason, content=content)
+def stream_chunk(content=None, reasoning_content=None, finish_reason=None, refusal=None, index=0):
+    return SimpleNamespace(choices=[SimpleNamespace(
+        index=index,
+        delta=SimpleNamespace(content=content, reasoning_content=reasoning_content, refusal=refusal),
+        finish_reason=finish_reason,
+    )])
 
 
 class FakeStream:
-    def __init__(self, chunks, message):
+    def __init__(self, chunks):
         self.chunks = chunks
-        self.message = message
+        self.closed = False
 
     def __enter__(self):
         return self
 
     def __exit__(self, *exc):
+        self.closed = True
         return False
 
-    @property
-    def text_stream(self):
+    def __iter__(self):
         return iter(self.chunks)
-
-    def get_final_message(self):
-        return self.message
 
 
 class FakeClient:
-    """client.beta.messages.stream(**kwargs) streaming canned text; records the calls."""
+    """client.chat.completions.create(**kwargs), streaming canned completion chunks."""
 
-    def __init__(self, chunks=(), message=None, error=None):
+    def __init__(self, chunks=(), finish_reason="stop", error=None):
         self.calls = []
-        self.chunks = list(chunks)
-        self.message = message if message is not None else final("".join(self.chunks))
+        self.chunks = [stream_chunk(content=c) if isinstance(c, str) else c for c in chunks]
+        if finish_reason is not None:
+            self.chunks.append(stream_chunk(finish_reason=finish_reason))
         self.error = error
-        self.beta = SimpleNamespace(messages=SimpleNamespace(stream=self.stream))
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self.stream))
+        self.last_stream = None
 
     def stream(self, **kwargs):
         self.calls.append(kwargs)
         if self.error is not None:
             raise self.error
-        return FakeStream(self.chunks, self.message)
+        self.last_stream = FakeStream(self.chunks)
+        return self.last_stream
 
 
 # -- audio ------------------------------------------------------------------------------

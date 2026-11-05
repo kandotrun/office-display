@@ -13,7 +13,7 @@ WorkingDirectory=@HOME@/earendil
 Environment=EARENDIL_PORT=8101
 Environment=EARENDIL_SPEECH_URL=http://127.0.0.1:8098/status
 Environment=EARENDIL_AUDIO_OUT=@AUDIO_OUT@
-# ANTHROPIC_API_KEY and optional overrides (EARENDIL_TTS, EARENDIL_VOICEVOX_SPEAKER, ...).
+# DEEPSEEK_API_KEY and optional overrides (EARENDIL_TTS, EARENDIL_VOICEVOX_SPEAKER, ...).
 # Created by hand on the display with mode 0600; never in the repository.
 # Without it the band still shows the values; questions get "no_api_key".
 EnvironmentFile=-@HOME@/earendil/earendil.env
@@ -24,7 +24,7 @@ Environment=EARENDIL_CACHE_DIR=/var/cache/earendil
 RuntimeDirectory=earendil
 RuntimeDirectoryMode=0700
 Environment=EARENDIL_RUNTIME_DIR=/run/earendil
-# A virtualenv with the anthropic SDK (install-units.sh creates it).
+# A virtualenv with the OpenAI-compatible SDK (install-units.sh creates it).
 ExecStart=@HOME@/earendil/.venv/bin/python -u @HOME@/earendil/earendil_server.py
 Restart=always
 RestartSec=5

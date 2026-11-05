@@ -123,7 +123,7 @@ def capture():
                 break
             if not chunk:
                 break
-            frames = np.frombuffer(chunk, dtype=np.int16).reshape(-1, 2)
+            frames = np.frombuffer(chunk, dtype="<i2").reshape(-1, 2)
             mono = frames.mean(axis=1).astype(np.float32) / 32768.0
             rms = float(np.sqrt(np.mean(mono ** 2)))
             db = 20.0 * np.log10(max(rms, 1e-9))
@@ -139,7 +139,9 @@ def capture():
                     STATE["bands"] = bands_from(window)
                 STATE["updated"] = time.time()
             try:
-                QUEUE.put_nowait(mono.astype(np.float32).tobytes())
+                # AcceptWaveform(bytes) expects mono PCM16, not the normalised
+                # float32 samples used above for the meter and spectrum.
+                QUEUE.put_nowait((mono * 32768.0).astype("<i2").tobytes())
             except queue.Full:
                 try:
                     QUEUE.get_nowait()

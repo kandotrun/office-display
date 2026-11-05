@@ -1,0 +1,39 @@
+[Unit]
+Description=Earendil: the values band and the voice consultation agent for the 2F display
+After=network-online.target speech.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=@USER@
+Group=@USER@
+SupplementaryGroups=audio
+WorkingDirectory=@HOME@/earendil
+Environment=EARENDIL_PORT=8101
+Environment=EARENDIL_SPEECH_URL=http://127.0.0.1:8098/status
+Environment=EARENDIL_AUDIO_OUT=@AUDIO_OUT@
+# ANTHROPIC_API_KEY and optional overrides (EARENDIL_TTS, EARENDIL_VOICEVOX_SPEAKER, ...).
+# Created by hand on the display with mode 0600; never in the repository.
+# Without it the band still shows the values; questions get "no_api_key".
+EnvironmentFile=-@HOME@/earendil/earendil.env
+# The emblem SVG and the original values page text (refreshed daily).
+CacheDirectory=earendil
+Environment=EARENDIL_CACHE_DIR=/var/cache/earendil
+# Synthesised speech is written here only while it plays, then deleted.
+RuntimeDirectory=earendil
+RuntimeDirectoryMode=0700
+Environment=EARENDIL_RUNTIME_DIR=/run/earendil
+# A virtualenv with the anthropic SDK (install-units.sh creates it).
+ExecStart=@HOME@/earendil/.venv/bin/python -u @HOME@/earendil/earendil_server.py
+Restart=always
+RestartSec=5
+PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+DevicePolicy=closed
+DeviceAllow=char-alsa rw
+
+[Install]
+WantedBy=graphical.target

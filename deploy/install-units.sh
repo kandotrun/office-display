@@ -15,6 +15,8 @@ HOME_DIR=${HOME_DIR:-/home/$DISPLAY_USER}
 APP_ROOT=${APP_ROOT:-$HOME_DIR/photo-frame-rs}
 PYTHON=${PYTHON:-python3}
 AUDIO_DEVICE=${AUDIO_DEVICE:-plughw:0,0}
+# Where earendil speaks: an ALSA playback device (the TV over HDMI).
+AUDIO_OUT=${AUDIO_OUT:-default}
 # The office (public): Hiroshima, its JMA forecast office / area and the
 # AMeDAS point for temperatures (67437 = 広島).
 ATLAS_LAT=${ATLAS_LAT:-34.4080}
@@ -31,6 +33,9 @@ for value in "$ATLAS_LAT" "$ATLAS_LON" "$ATLAS_FORECAST_OFFICE" "$ATLAS_FORECAST
         "" | *[!0-9.-]*) echo "invalid atlas setting: $value" >&2; exit 1 ;;
     esac
 done
+case "$AUDIO_OUT" in
+    "" | *[!A-Za-z0-9:,=_.-]*) echo "invalid AUDIO_OUT: $AUDIO_OUT" >&2; exit 1 ;;
+esac
 
 render() {
     sed -e "s|@USER@|$DISPLAY_USER|g" \
@@ -38,6 +43,7 @@ render() {
         -e "s|@APP_ROOT@|$APP_ROOT|g" \
         -e "s|@PYTHON@|$PYTHON|g" \
         -e "s|@AUDIO_DEVICE@|$AUDIO_DEVICE|g" \
+        -e "s|@AUDIO_OUT@|$AUDIO_OUT|g" \
         -e "s|@ATLAS_LAT@|$ATLAS_LAT|g" \
         -e "s|@ATLAS_LON@|$ATLAS_LON|g" \
         -e "s|@ATLAS_FORECAST_OFFICE@|$ATLAS_FORECAST_OFFICE|g" \
@@ -65,8 +71,16 @@ tar cf - -C stats . | $SSH "tar xf - -C $HOME_DIR/office-stats"
 $SSH "mkdir -p $HOME_DIR/atlas"
 tar cf - --exclude=./tests --exclude=__pycache__ --exclude=.pytest_cache -C atlas . | $SSH "tar xf - -C $HOME_DIR/atlas"
 
+# earendil (values band + voice agent; talks to the Anthropic API and earendil.com).
+# Its virtualenv holds the anthropic SDK. The API key lives in earendil.env on
+# the display (mode 0600), which this script never touches.
+$SSH "mkdir -p $HOME_DIR/earendil"
+tar cf - --exclude=./tests --exclude=__pycache__ --exclude=.pytest_cache --exclude=./.venv --exclude=./earendil.env -C earendil . | $SSH "tar xf - -C $HOME_DIR/earendil"
+$SSH "cd $HOME_DIR/earendil && { [ -x .venv/bin/python ] || $PYTHON -m venv .venv; } && \
+      .venv/bin/pip install -q --upgrade -r requirements.txt"
+
 # systemd units
-for unit in photo-frame-rs.service presence-dimmer.service room-survey.service office-stats.service speech.service atlas.service; do
+for unit in photo-frame-rs.service presence-dimmer.service room-survey.service office-stats.service speech.service atlas.service earendil.service; do
     echo "installing $unit"
     render "systemd/$unit" | $SSH "sudo tee /etc/systemd/system/$unit >/dev/null"
 done
@@ -76,12 +90,14 @@ render display-session/xinitrc | $SSH "cat > $HOME_DIR/.xinitrc && chmod +x $HOM
 render display-session/bash_profile | $SSH "cat > $HOME_DIR/.bash_profile"
 
 $SSH "sudo systemctl daemon-reload && \
-      sudo systemctl enable photo-frame-rs.service presence-dimmer.service room-survey.service office-stats.service speech.service atlas.service"
+      sudo systemctl enable photo-frame-rs.service presence-dimmer.service room-survey.service office-stats.service speech.service atlas.service earendil.service"
 
-# atlas has no build step: the code copied above only runs after a (re)start.
-# enable --now starts it on a first install, try-restart picks up new code.
-$SSH "sudo systemctl enable --now atlas.service && \
-      sudo systemctl try-restart atlas.service"
+# atlas and earendil have no build step: the code copied above only runs after
+# a (re)start. enable --now starts them on a first install, try-restart picks
+# up new code. speech is restarted for the phrase feed earendil reads.
+$SSH "sudo systemctl enable --now atlas.service earendil.service && \
+      sudo systemctl try-restart atlas.service earendil.service speech.service"
 
-echo "installed. atlas restarted; X session changes apply on the next reboot."
+echo "installed. atlas, earendil and speech restarted; X session changes apply on the next reboot."
+echo "earendil answers only once $HOME_DIR/earendil/earendil.env holds ANTHROPIC_API_KEY (chmod 600)."
 echo "The photo frame starts from $APP_ROOT/current/bin — run build-and-deploy.sh first."

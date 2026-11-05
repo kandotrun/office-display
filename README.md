@@ -35,12 +35,12 @@
   OSM / 気象庁 / ──▶ │  atlas (loopback :8099) ── 地図・雨雲・地球 ──▶ 情報帯 │
   NASA / Nominatim  │   公開データを取得。ディスクキャッシュ付き          │
                     │                                                    │
-  Anthropic API ◀──▶ │  earendil (loopback :8101) ◀── speech (8098) の字幕 │
+  DeepSeek API ◀──▶ │  earendil (loopback :8101) ◀── speech (8098) の字幕 │
   earendil.com ───▶ │   呼びかけを聞いて答え、声で話す ──▶ Values の帯    │
                     └────────────────────────────────────────────────────┘
 ```
 
-- アプリ（photo-frame-rs）は `127.0.0.1` としか話しません。このリポジトリのサービスで外部と通信するのは `atlas` と `earendil` だけです。`atlas` は地図タイル・雨雲・天気・衛星画像を、`earendil` はロゴと Values の原文を取得し、呼びかけられた質問の書き起こしだけを Anthropic API へ送ります（写真は別管理の photo-manager が Immich から取得します）。
+- アプリ（photo-frame-rs）は `127.0.0.1` としか話しません。このリポジトリのサービスで外部と通信するのは `atlas` と `earendil` だけです。`atlas` は地図タイル・雨雲・天気・衛星画像を、`earendil` はロゴと Values の原文を取得し、呼びかけられた質問の書き起こしだけを DeepSeek API へ送ります（写真は別管理の photo-manager が Immich から取得します）。
 - 顔検出は「何人いるか」だけを使い、身元特定・履歴保存はしません。
 - カメラ映像はメモリ上だけで扱い、ディスクに残しません。
 

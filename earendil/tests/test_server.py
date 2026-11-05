@@ -284,6 +284,57 @@ def test_a_whole_answer_with_history(tmp_path):
     assert all("徹夜" not in line and "明日" not in line for line in logs)
 
 
+@pytest.mark.parametrize("max_age,expected", [(10, "idle"), (30, "thinking")])
+def test_local_stt_latency_can_be_allowed_without_changing_capture_timestamp(tmp_path, max_age, expected):
+    speech = Speech()
+    app, _, clock = make(tmp_path, speech=speech, phrase_max_age=max_age, spawn=lambda *args: None)
+    speech.say("エンデルヒールなら休むのは大事？", clock() - 16)
+    app.poll_speech()
+    assert app.conversation.status()["state"] == expected
+
+
+def test_delayed_local_stt_still_suppresses_audio_captured_during_tv_speech(tmp_path):
+    speech = Speech()
+    app, _, clock = make(tmp_path, speech=speech, phrase_max_age=30, spawn=lambda *args: None)
+    clock.t = T0 - 20
+    app.conversation.voice_started(0, clock(), 0.05, [0.5])
+    clock.t = T0 - 14
+    app.conversation.voice_finished(0)
+    clock.t = T0
+    speech.say("エンデルヒールなら休むのは大事？", T0 - 17)
+    app.poll_speech()
+    assert app.conversation.status()["state"] == "idle"
+    assert app.conversation.status()["conversation"] == 0
+
+
+@pytest.mark.parametrize("started_at,expected", [(T0 - 21, "idle"), (T0 - 15, "thinking")])
+def test_whisper_interval_rejects_mixed_tv_echo_even_when_room_sound_ends_later(tmp_path, started_at, expected):
+    speech = Speech()
+    app, _, clock = make(tmp_path, speech=speech, phrase_max_age=30, spawn=lambda *args: None)
+    clock.t = T0 - 20
+    app.conversation.voice_started(0, clock(), 0.05, [0.5])
+    clock.t = T0 - 18
+    app.conversation.voice_finished(0)
+    clock.t = T0
+    speech.say("エンデルヒールなら休むのは大事？", T0 - 12)
+    speech.doc["phrases"][-1]["started_at"] = started_at
+    app.poll_speech()
+    assert app.conversation.status()["state"] == expected
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("エンデルヒール、エンゼルヒール、エアレンディル", "idle"),
+    ("エンデルヒール", "idle"),
+    ("エンデルヒールなら休むのは大事？", "thinking"),
+])
+def test_optional_wake_cue_requires_a_deliberate_call_after_the_name(tmp_path, text, expected):
+    speech = Speech()
+    app, _, clock = make(tmp_path, speech=speech, require_wake_cue=True, spawn=lambda *args: None)
+    speech.say(text, clock())
+    app.poll_speech()
+    assert app.conversation.status()["state"] == expected
+
+
 def test_old_exchanges_are_forgotten_on_the_poller_tick(tmp_path):
     app, _, clock = make(tmp_path, client=FakeClient(CHUNKS))
     app.conversation.ask(QUESTION)

@@ -224,9 +224,26 @@ GET /status  {"db":…, "bands":[…], "text":…, "partial":…, "speaking":boo
 - **字幕はざっくり**です。日本語の小さいVoskモデルに、マイクの mono PCM16 ストリームを流しています
 - 画面に出るだけ。**ディスクには一切書きません**。話者も特定しません
 - 直近数フレーズだけをメモリに保持し、古くなれば消えます
-- `SPEECH_VAD_DB` は発話中の表示と途中字幕の消去に使います。音声認識の区切りは Vosk が判定します
+- Vosk では `SPEECH_VAD_DB` を発話中の表示と途中字幕の消去に使い、音声認識の区切りは Vosk が判定します
 
 `room-survey` はこのサービスから音量・スペクトラム・字幕を受け取り、計測図の下部に字幕を描きます。表示中は `LISTENING` を出します。
+
+### 端末内の Whisper を使う
+
+`SPEECH_BACKEND=whisper` で、事前に配置した日本語対応の Whisper モデルを CPU で使えます。音声はメモリ内の PCM だけで処理し、外部へ送ったり音声ファイルへ保存したりしません。追加依存は `speech/requirements-whisper.txt` です。
+
+表示機の `~/speech/speech.env` に設定します。このファイルは配備時に上書きしません。
+
+```sh
+SPEECH_BACKEND=whisper
+SPEECH_WHISPER_MODEL=/absolute/path/to/local/faster-whisper-small
+SPEECH_WHISPER_THREADS=2
+SPEECH_WHISPER_PROMPT=エンデルヒール
+```
+
+モデルのディレクトリには `config.json`・`model.bin`・`tokenizer.json`・`vocabulary.txt` を事前に配置します。実行時にはモデルのダウンロードを行いません。`SPEECH_WHISPER_PROMPT` は固有名詞の表記のヒントです。無音確率が高い結果、繰り返し、ヒントの名前だけの結果は表示・呼びかけ判定へ渡しません。
+
+発話は既定で0.7秒の無音、または8秒の上限で区切ります。`SPEECH_WHISPER_VAD_DB`・`SPEECH_WHISPER_SILENCE_SECONDS`・`SPEECH_WHISPER_MAX_SECONDS` で調整できます。認識結果には録音開始の `started_at` と発話終了の `at` を付け、テレビの発声区間に重なる録音を `earendil` が除外します。認識に時間がかかる場合は `earendil.env` の `EARENDIL_PHRASE_MAX_AGE` と `EARENDIL_LISTEN_SECONDS` も調整します。
 
 ## earendil
 
@@ -304,6 +321,8 @@ sudo systemctl restart earendil
 | `EARENDIL_MODEL` / `EARENDIL_EFFORT` | `deepseek-flash` / `none` | モデルと推論の深さ（`none`・`low`・`high`・`max`） |
 | `EARENDIL_EMBLEM_URL` | earendil.com のロゴ | 別のロゴにしたいときは SVG の URL かパス |
 | `EARENDIL_LISTEN_SECONDS` / `EARENDIL_HOLD_SECONDS` | `8` / `25` | 名前だけのあと質問を待つ秒数 / 答えを出しておく秒数 |
+| `EARENDIL_PHRASE_MAX_AGE` | `10` | 取り込む発話の最大経過秒数。端末内の音声認識に時間がかかる場合は増やします |
+| `EARENDIL_WAKE_REQUIRES_CUE` | `0` | `1` で名前の後の「なら」などを必須にします。名前ヒントを使う Whisper での誤反応を抑えるための設定です |
 
 全部の変数は `earendil/earendil_server.py` の冒頭にあります。
 

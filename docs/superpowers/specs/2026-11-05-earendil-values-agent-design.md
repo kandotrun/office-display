@@ -56,7 +56,9 @@ Existing fields stay. New field:
   independent of the caption hold.
 - `seq` increases by one per final phrase and restarts at 1 when the service
   restarts. A reader that sees `seq` go backwards resets its cursor.
-- `at` is when the phrase was finalised.
+- `at` is the end time of captured speech. Local Whisper also supplies
+  `started_at` for the beginning of its captured interval, including pre-roll;
+  neither timestamp is replaced with the later CPU decoding completion time.
 
 ### earendil `GET /values.json`
 
@@ -161,8 +163,9 @@ Rules:
    (なら, だったら, さん, 的には, 、) removed. If fewer than 3 characters remain,
    enter `listening` and take the next phrase within `EARENDIL_LISTEN_SECONDS`
    (8) as the question; otherwise return to `idle` silently.
-5. Echo: phrases finalised while the service is speaking, or within 2 s after,
-   are ignored (the microphone hears the TV). While `thinking`/`speaking`,
+5. Echo: captured intervals overlapping the service's speech, or the 2 s after,
+   are ignored (the microphone hears the TV), even when decoding finishes later.
+   While `thinking`/`speaking`,
    new wakes are ignored. In `answered`/`error`, a wake starts a new
    conversation.
 

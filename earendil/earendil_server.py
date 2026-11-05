@@ -48,6 +48,8 @@ Environment:
     EARENDIL_RUNTIME_DIR        $RUNTIME_DIRECTORY, else the temp dir (audio while it plays;
                                 earendil-*.wav left there by an abrupt exit is swept at start)
     EARENDIL_LISTEN_SECONDS     8 (how long a bare wake waits for the question)
+    EARENDIL_PHRASE_MAX_AGE     10 (maximum age of captured speech; allow local STT latency)
+    EARENDIL_WAKE_REQUIRES_CUE  0 (1 requires a cue such as なら after the name)
     EARENDIL_HOLD_SECONDS       25 (how long an answer stays after the voice ends)
     EARENDIL_USER_AGENT         office-display-earendil/0.1 (+https://github.com/kandotrun/office-display)
 """
@@ -86,6 +88,8 @@ OPENJTALK_DIC = os.environ.get("EARENDIL_OPENJTALK_DIC", voice.OPENJTALK_DIC)
 OPENJTALK_VOICE = os.environ.get("EARENDIL_OPENJTALK_VOICE", voice.OPENJTALK_VOICE)
 AUDIO_OUT = os.environ.get("EARENDIL_AUDIO_OUT", "default")
 LISTEN_SECONDS = float(os.environ.get("EARENDIL_LISTEN_SECONDS", "8"))
+PHRASE_MAX_AGE = float(os.environ.get("EARENDIL_PHRASE_MAX_AGE", str(conversation.PHRASE_MAX_AGE)))
+WAKE_REQUIRES_CUE = os.environ.get("EARENDIL_WAKE_REQUIRES_CUE", "0").lower() in ("1", "true", "yes")
 HOLD_SECONDS = float(os.environ.get("EARENDIL_HOLD_SECONDS", "25"))
 
 POLL_EVERY = 0.25
@@ -124,6 +128,8 @@ class Earendil:
         speaker=None,
         spawn=spawn_thread,
         listen_seconds=LISTEN_SECONDS,
+        phrase_max_age=PHRASE_MAX_AGE,
+        require_wake_cue=WAKE_REQUIRES_CUE,
         hold_seconds=HOLD_SECONDS,
         clock=time.time,
         log=print,
@@ -144,7 +150,7 @@ class Earendil:
         disk = cache.DiskCache(cache_dir)
         self.source = values.SourceText(values_url, disk, fetch)
         self.emblem_source = emblem.EmblemSource(emblem_location, disk, fetch)
-        self.cursor = conversation.PhraseCursor()
+        self.cursor = conversation.PhraseCursor(max_age=phrase_max_age)
         self.history = oracle.History(clock=clock)
         self.oracle = oracle.Oracle(
             template,
@@ -167,6 +173,7 @@ class Earendil:
             clock=clock,
             listen_seconds=listen_seconds,
             hold_seconds=hold_seconds,
+            require_wake_cue=require_wake_cue,
             log=log,
         )
         if speaker is not None:
@@ -214,8 +221,17 @@ class Earendil:
             return
         if self._speech(True) is False:
             self.log("earendil: speech is back")
-        for _, at, text in self.cursor.new(doc.get("phrases"), self.clock()):
-            self.conversation.phrase(at, text)
+        phrases = doc.get("phrases")
+        starts = {}
+        if isinstance(phrases, list):
+            for phrase in phrases:
+                if (isinstance(phrase, dict) and isinstance(phrase.get("seq"), int)
+                        and isinstance(phrase.get("started_at"), (int, float))
+                        and isinstance(phrase.get("at"), (int, float))
+                        and phrase["started_at"] <= phrase["at"]):
+                    starts[phrase["seq"]] = phrase["started_at"]
+        for seq, at, text in self.cursor.new(phrases, self.clock()):
+            self.conversation.phrase(at, text, started_at=starts.get(seq))
         partial = doc.get("partial")
         if isinstance(partial, str):
             self.conversation.heard(partial)

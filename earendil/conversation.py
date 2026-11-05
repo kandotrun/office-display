@@ -74,6 +74,7 @@ class Conversation:
         hold_seconds=25.0,
         echo_seconds=2.0,
         busy_seconds=180.0,
+        require_wake_cue=False,
         log=print,
     ):
         self.persona = persona
@@ -86,6 +87,7 @@ class Conversation:
         self.hold_seconds = hold_seconds
         self.echo_seconds = echo_seconds
         self.busy_seconds = busy_seconds
+        self.require_wake_cue = require_wake_cue
         self.log = log
         self.lock = threading.Lock()
 
@@ -166,8 +168,10 @@ class Conversation:
             self._hold(now)
             self._enter(ANSWERED)
 
-    def _echo(self, at):
-        return any(start <= at and (end is None or at <= end + self.echo_seconds) for start, end in self.windows)
+    def _echo(self, at, started_at=None):
+        captured_start = at if started_at is None else min(started_at, at)
+        return any(start <= at and (end is None or captured_start <= end + self.echo_seconds)
+                   for start, end in self.windows)
 
     @staticmethod
     def _run(actions):
@@ -176,14 +180,14 @@ class Conversation:
 
     # -- inputs ------------------------------------------------------------------------
 
-    def phrase(self, at, text):
-        """A final phrase from speech, finalised at unix time `at`."""
+    def phrase(self, at, text, started_at=None):
+        """A phrase captured by `at`, optionally spanning from `started_at`."""
         actions = []
         with self.lock:
             now = self.clock()
-            if self._echo(at) or self.state in BUSY:
+            if self._echo(at, started_at) or self.state in BUSY:
                 return
-            hit = wake.detect(text)
+            hit = wake.detect(text, require_cue=self.require_wake_cue)
             if self.state == LISTENING:
                 if hit is not None and hit.question:
                     actions = self._ask(hit.question, now)

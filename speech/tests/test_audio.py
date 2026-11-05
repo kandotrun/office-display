@@ -158,8 +158,7 @@ def test_capture_delivers_mono_pcm16_to_vosk_and_keeps_normalised_meter(monkeypa
             raise EndCapture
 
     monkeypatch.setattr(audio, "get", next_chunk)
-    monkeypatch.setattr(srv.vosk, "Model", lambda path: "test-model", raising=False)
-    monkeypatch.setattr(srv.vosk, "KaldiRecognizer", Recognizer, raising=False)
+    monkeypatch.setattr(srv, "vosk", SimpleNamespace(Model=lambda path: "test-model", KaldiRecognizer=Recognizer))
     with pytest.raises(EndCapture):
         srv.transcribe()
     assert calls == [expected.tobytes()]

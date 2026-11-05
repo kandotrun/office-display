@@ -107,3 +107,6 @@ def test_status_serves_phrases_next_to_the_existing_fields(served, monkeypatch):
     assert {"db", "bands", "text", "partial", "speaking", "updated", "phrases"} <= set(doc)
     assert doc["text"] == "エンゼル ヒール なら どう 思う"
     assert doc["phrases"] == [{"seq": 1, "at": 1793782800.0, "text": "エンゼル ヒール なら どう 思う"}]
+    for name in ("sample_rate", "capture_samples", "decoded_samples", "dropped_chunks", "dropped_samples",
+                 "discarded_capture_bytes", "last_decode_at", "queued_audio_ms"):
+        assert isinstance(doc[name], (int, float))

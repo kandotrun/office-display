@@ -4,11 +4,18 @@
 ALSA allows one process to hold the capture device, so this service owns the
 microphone and serves everything derived from it:
 
-    GET /status   {"db":..., "bands":[...], "text":..., "partial":..., "speaking":bool}
+    GET /status   {"db":..., "bands":[...], "text":..., "partial":..., "speaking":bool,
+                   "phrases":[{"seq":..., "at":..., "text":...}, ...]}
 
 Captions are deliberately rough: a small Japanese Vosk model fed only the
 speech segments. They are kept in memory for the last few phrases and are never
 written to disk. Nothing here identifies a speaker.
+
+"text" is the caption (the last two phrases younger than SPEECH_CAPTION_HOLD).
+"phrases" are the last SPEECH_MAX_PHRASES final phrases, oldest first, whatever
+their age: "seq" counts final phrases from 1 since this process started (a
+reader that sees it go backwards resets its cursor) and "at" is the unix time
+the phrase was finalised. earendil reads them to hear its wake phrase.
 """
 import json
 import os
@@ -41,8 +48,44 @@ STATE = {
     "partial": "",
     "speaking": False,
     "updated": 0.0,
+    "phrases": [],
 }
 QUEUE = queue.Queue(maxsize=40)  # ~4 s; drop oldest rather than fall behind
+
+
+class Phrases:
+    """The last few final phrases: numbered, timestamped, nothing else (no audio)."""
+
+    def __init__(self, keep=MAX_PHRASES):
+        self.keep = keep
+        self.seq = 0
+        self.items = []  # (seq, unix time, monotonic time, text), oldest first
+
+    def add(self, text, at, mono):
+        """Record a final phrase; its seq, or None for an empty result."""
+        text = text.strip()
+        if not text:
+            return None
+        self.seq += 1
+        self.items.append((self.seq, at, mono, text))
+        del self.items[:-self.keep]
+        return self.seq
+
+    def _fresh(self, now, hold):
+        return [p for p in self.items if now - p[2] <= hold]
+
+    def caption(self, now, hold):
+        """The caption: the last two phrases younger than hold (monotonic seconds)."""
+        return " / ".join(p[3] for p in self._fresh(now, hold)[-2:])
+
+    def quiet_for(self, now, hold):
+        """Seconds since the newest phrase younger than hold (inf without one)."""
+        fresh = self._fresh(now, hold)
+        return now - fresh[-1][2] if fresh else float("inf")
+
+    def public(self):
+        """The /status "phrases" list (a new list: safe to publish as is)."""
+        return [{"seq": seq, "at": round(at, 2), "text": text} for seq, at, _, text in self.items]
 
 
 def bands_from(window):
@@ -113,24 +156,25 @@ def transcribe():
     model = vosk.Model(MODEL_PATH)
     rec = vosk.KaldiRecognizer(model, RATE)
     rec.SetWords(False)
-    phrases = []  # (monotonic time, text)
+    phrases = Phrases(MAX_PHRASES)
     while True:
         data = QUEUE.get()
         done = rec.AcceptWaveform(data)
         if done:
-            text = json.loads(rec.Result()).get("text", "").strip()
-            if text:
-                phrases.append((time.monotonic(), text))
-                del phrases[:-MAX_PHRASES]
+            text = json.loads(rec.Result()).get("text", "")
+            phrases.add(text, time.time(), time.monotonic())
         else:
             partial = json.loads(rec.PartialResult()).get("partial", "").strip()
             with LOCK:
                 STATE["partial"] = partial
         now = time.monotonic()
-        fresh = [p for p in phrases if now - p[0] <= CAPTION_HOLD]
+        caption = phrases.caption(now, CAPTION_HOLD)
+        quiet = phrases.quiet_for(now, CAPTION_HOLD)
+        public = phrases.public()
         with LOCK:
-            STATE["text"] = " / ".join(t for _, t in fresh[-2:])
-            if not STATE["speaking"] and now - (fresh[-1][0] if fresh else 0) > 8:
+            STATE["text"] = caption
+            STATE["phrases"] = public
+            if not STATE["speaking"] and quiet > 8:
                 STATE["partial"] = ""
 
 

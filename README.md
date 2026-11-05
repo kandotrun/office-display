@@ -221,7 +221,7 @@ GET /status  {"db":…, "bands":[…], "text":…, "partial":…, "speaking":boo
 
 `phrases` は確定した直近のフレーズ（既定6つ）に通し番号を付けたもので、`earendil` が呼びかけを聞き取るのに使います。番号は再起動で1に戻ります。
 
-- **字幕はざっくり**です。日本語の小さいVoskモデルに、マイクの mono PCM16 ストリームを流しています
+- **既定の字幕はざっくり**です。日本語の小さいVoskモデルに、マイクの mono PCM16 ストリームを流しています。Whisper は後述の設定で選べます
 - 画面に出るだけ。**ディスクには一切書きません**。話者も特定しません
 - 直近数フレーズだけをメモリに保持し、古くなれば消えます
 - Vosk では `SPEECH_VAD_DB` を発話中の表示と途中字幕の消去に使い、音声認識の区切りは Vosk が判定します
@@ -241,7 +241,7 @@ SPEECH_WHISPER_THREADS=2
 SPEECH_WHISPER_PROMPT=エンデルヒール
 ```
 
-モデルのディレクトリには `config.json`・`model.bin`・`tokenizer.json`・`vocabulary.txt` を事前に配置します。実行時にはモデルのダウンロードを行いません。`SPEECH_WHISPER_PROMPT` は固有名詞の表記のヒントです。無音確率が高い結果、繰り返し、ヒントの名前だけの結果は表示・呼びかけ判定へ渡しません。
+モデルのディレクトリには `config.json`・`model.bin`・`tokenizer.json`・`vocabulary.txt` を事前に配置します。実行時にはモデルのダウンロードを行いません。`SPEECH_WHISPER_PROMPT` は固有名詞の表記のヒントです。無音確率が高い結果、圧縮率が高い反復、ヒントの名前だけの結果は表示・呼びかけ判定へ渡しません。
 
 発話は既定で0.7秒の無音、または8秒の上限で区切ります。`SPEECH_WHISPER_VAD_DB`・`SPEECH_WHISPER_SILENCE_SECONDS`・`SPEECH_WHISPER_MAX_SECONDS` で調整できます。認識結果には録音開始の `started_at` と発話終了の `at` を付け、テレビの発声区間に重なる録音を `earendil` が除外します。認識に時間がかかる場合は `earendil.env` の `EARENDIL_PHRASE_MAX_AGE` と `EARENDIL_LISTEN_SECONDS` も調整します。
 
@@ -263,7 +263,7 @@ Earendil Inc. の [Values](https://earendil.com/values/) を常に画面に出�
 
 「**エンデルヒールなら**、締め切り前の徹夜ってどう思う？」のように、名前と質問を一息で言います。名前だけ言って間を置き、8秒以内に質問しても構いません。
 
-字幕は Vosk の小さいモデルなので、名前はまず正しく書き起こされません。実測した聞き間違い（「エンゼル ヒール」「エンゼル ビール」「えー で いる なら」など）をかな読みで照合しています。
+既定の Vosk の小さいモデルでは、名前はまず正しく書き起こされません。実測した聞き間違い（「エンゼル ヒール」「エンゼル ビール」「えー で いる なら」など）をかな読みで照合しています。Whisper でも同じ呼びかけ判定を使います。
 
 - 「エンゼル ヒール」のような**強い候補**は、それだけで反応します
 - 「エネルギー」のような普通の言葉でもある**弱い候補**は、完全一致し、すぐ後に「なら」「さん」などが続くときだけ反応します
@@ -321,7 +321,7 @@ sudo systemctl restart earendil
 | `EARENDIL_MODEL` / `EARENDIL_EFFORT` | `deepseek-flash` / `none` | モデルと推論の深さ（`none`・`low`・`high`・`max`） |
 | `EARENDIL_EMBLEM_URL` | earendil.com のロゴ | 別のロゴにしたいときは SVG の URL かパス |
 | `EARENDIL_LISTEN_SECONDS` / `EARENDIL_HOLD_SECONDS` | `8` / `25` | 名前だけのあと質問を待つ秒数 / 答えを出しておく秒数 |
-| `EARENDIL_PHRASE_MAX_AGE` | `10` | 取り込む発話の最大経過秒数。端末内の音声認識に時間がかかる場合は増やします |
+| `EARENDIL_PHRASE_MAX_AGE` | `10` | 取り込む録音開始からの最大経過秒数（正の有限値、上限60秒）。端末内の音声認識に時間がかかる場合は増やします |
 | `EARENDIL_WAKE_REQUIRES_CUE` | `0` | `1` で名前の後の「なら」などを必須にします。名前ヒントを使う Whisper での誤反応を抑えるための設定です |
 
 全部の変数は `earendil/earendil_server.py` の冒頭にあります。

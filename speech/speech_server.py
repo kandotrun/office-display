@@ -177,7 +177,7 @@ class Phrases:
 
     def add(self, text, at, mono, started_at=None):
         """Record a final phrase; its seq, or None for an empty result."""
-        text = text.strip()[:MAX_PHRASE_CHARS]
+        text = text.strip()
         if not text:
             return None
         self.seq += 1

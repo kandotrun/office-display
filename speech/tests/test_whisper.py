@@ -40,6 +40,21 @@ def test_silence_and_short_noise_do_not_create_decode_jobs():
     assert segmenter.samples == 0
 
 
+def test_capture_gap_finishes_old_words_and_drops_pre_gap_context():
+    segmenter = wb.Segmenter(pre_roll_seconds=.2, silence_seconds=.2,
+                             min_speech_seconds=.2, max_seconds=8)
+    assert segmenter.feed(pcm(), 1000.1, 100.1) == []
+    assert segmenter.feed(pcm(), 1000.2, 100.2) == []
+    (before_gap,) = segmenter.feed(pcm(), 1100.1, 200.1)
+    assert before_gap.ended_at == 1000.2
+    assert before_gap.pcm == pcm() * 2
+    assert segmenter.feed(pcm(), 1100.2, 200.2) == []
+    assert segmenter.feed(pcm(0), 1100.3, 200.3) == []
+    (after_gap,) = segmenter.feed(pcm(0), 1100.4, 200.4)
+    assert after_gap.started_at == pytest.approx(1100.0)
+    assert after_gap.pcm == pcm() * 2 + pcm(0) * 2
+
+
 def test_long_speech_is_split_at_the_exact_bounded_duration():
     segmenter = wb.Segmenter(pre_roll_seconds=.1, silence_seconds=.2,
                              min_speech_seconds=.1, max_seconds=.4)
@@ -103,6 +118,24 @@ def test_name_hints_and_repetitions_cannot_become_a_spoken_utterance(tmp_path, t
     decoder, _ = make_decoder(tmp_path, [SimpleNamespace(text=text, no_speech_prob=.1,
         avg_logprob=-.2, compression_ratio=compression)], prompt="エンデルヒール、エンゼルヒール")
     assert decoder.recognize(np.zeros(1600, dtype=np.float32)) == wb.Recognition("", 1)
+
+
+@pytest.mark.parametrize("text,prompt", [
+    ("えんでるひーる", "エンデルヒール"),
+    ("エンゼルヒール", "エンデルヒール エンゼルヒール"),
+    ("エンゼルヒール", "エンデルヒール，エンゼルヒール；エアレンディル"),
+])
+def test_name_hint_filter_handles_kana_and_vocabulary_separators(tmp_path, text, prompt):
+    decoder, _ = make_decoder(tmp_path, [SimpleNamespace(text=text, no_speech_prob=.1,
+        avg_logprob=-.2)], prompt=prompt)
+    assert decoder.recognize(np.zeros(1600, dtype=np.float32)) == wb.Recognition("", 1)
+
+
+def test_genuine_question_repeated_twice_is_retained_as_one_recognition(tmp_path):
+    text = "エンデルヒールなら休むのは大事？" * 2
+    decoder, _ = make_decoder(tmp_path, [SimpleNamespace(text=text, no_speech_prob=.1,
+        avg_logprob=-.2, compression_ratio=1.8)], prompt="エンデルヒール")
+    assert decoder.recognize(np.zeros(1600, dtype=np.float32)).text == text
 
 
 def test_delayed_result_keeps_capture_timestamp_and_monotonic_caption_expiry(monkeypatch):

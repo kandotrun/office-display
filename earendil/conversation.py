@@ -15,6 +15,7 @@
 All state sits behind one lock; the clock is injectable. Nothing here logs
 what was asked or answered: only state names and error codes.
 """
+import math
 import threading
 import time
 
@@ -31,6 +32,7 @@ MAX_VALUES = 3
 MAX_LEVELS = 1200
 MAX_CREDIT = 64
 PHRASE_MAX_AGE = 10.0  # older phrases (a restart, a stalled poller) are not acted on
+PHRASE_MAX_AGE_LIMIT = 60.0
 MAX_WINDOWS = 16
 
 
@@ -38,6 +40,8 @@ class PhraseCursor:
     """New final phrases from successive speech /status documents, each once."""
 
     def __init__(self, max_age=PHRASE_MAX_AGE):
+        if not math.isfinite(max_age) or not 0 < max_age <= PHRASE_MAX_AGE_LIMIT:
+            raise ValueError("phrase max age must be finite and between 0 and 60 seconds")
         self.max_age = max_age
         self.seq = 0
 
@@ -49,14 +53,18 @@ class PhraseCursor:
             if not isinstance(p, dict):
                 continue
             seq, at, text = p.get("seq"), p.get("at"), p.get("text")
-            if isinstance(seq, int) and isinstance(at, (int, float)) and isinstance(text, str):
-                valid.append((seq, float(at), text))
+            start = p.get("started_at", at)
+            if (isinstance(seq, int) and isinstance(at, (int, float)) and math.isfinite(at)
+                    and isinstance(start, (int, float)) and math.isfinite(start)
+                    and start <= at and isinstance(text, str)):
+                valid.append((seq, float(at), text, float(start)))
         if not valid:
             return []
         valid.sort()
         if valid[-1][0] < self.seq:
             self.seq = 0  # speech restarted and counts from 1 again
-        out = [p for p in valid if p[0] > self.seq and now - p[1] <= self.max_age]
+        out = [(seq, at, text) for seq, at, text, start in valid
+               if seq > self.seq and now - start <= self.max_age]
         self.seq = max(self.seq, valid[-1][0])
         return out
 
@@ -228,7 +236,8 @@ class Conversation:
                 self._fail("llm_failed", now)
             elif self.state in DONE and self.deadline is not None and now >= self.deadline:
                 self._idle()
-            self.windows = [w for w in self.windows if w[1] is None or now - w[1] <= 60][-MAX_WINDOWS:]
+            self.windows = [w for w in self.windows if w[1] is None
+                            or now - w[1] <= PHRASE_MAX_AGE_LIMIT + self.echo_seconds][-MAX_WINDOWS:]
 
     # -- from the answer thread ---------------------------------------------------------
 

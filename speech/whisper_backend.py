@@ -27,7 +27,13 @@ MAX_COMPRESSION_RATIO = 2.4
 
 
 def normalized_words(text):
-    return "".join(ch for ch in unicodedata.normalize("NFKC", text).casefold() if ch.isalnum())
+    out = []
+    for ch in unicodedata.normalize("NFKC", text).casefold():
+        if 0x30A1 <= ord(ch) <= 0x30F6:
+            ch = chr(ord(ch) - 0x60)
+        if ch.isalnum():
+            out.append(ch)
+    return "".join(out)
 
 
 @dataclass(frozen=True)
@@ -66,6 +72,7 @@ class Segmenter:
         self.samples = self.voiced = self.quiet = 0
         self.ended_at = self.ended_mono = 0.0
         self.started_at = 0.0
+        self.last_input_mono = None
 
     def _remember(self, pcm):
         self.pre.append(bytes(pcm))
@@ -91,6 +98,16 @@ class Segmenter:
         if len(pcm) % 2:
             raise ValueError("mono PCM16 must contain complete samples")
         out = []
+        input_start = ended_mono - len(pcm) / (RATE * 2)
+        if self.last_input_mono is not None and input_start - self.last_input_mono > 0.05:
+            # Do not join words from opposite sides of a device restart or
+            # a dropped audio block into one apparent continuous call.
+            previous = self._finish()
+            if previous is not None:
+                out.append(previous)
+            self.pre.clear()
+            self.pre_samples = 0
+        self.last_input_mono = ended_mono
         remaining = bytes(pcm)
         while remaining:
             data = np.frombuffer(remaining, dtype="<i2").astype(np.float32) / 32768.0
@@ -139,7 +156,8 @@ class LocalWhisper:
                                    cpu_threads=int(threads), num_workers=1,
                                    local_files_only=True)
         self.prompt = prompt.strip()[:MAX_TEXT] or None
-        self.prompt_terms = [normalized_words(term) for term in re.split(r"[、,，。.;；\n]", self.prompt or "")]
+        hint = unicodedata.normalize("NFKC", self.prompt or "")
+        self.prompt_terms = [normalized_words(term) for term in re.split(r"[\s、,。.;]+", hint)]
 
     def recognize(self, audio):
         # ndarray input bypasses all file/media decoders and stays in memory.

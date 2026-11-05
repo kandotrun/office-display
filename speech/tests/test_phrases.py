@@ -29,6 +29,14 @@ def test_empty_results_are_not_phrases():
     assert add(phrases, "はい", 2) == 1
 
 
+def test_long_vosk_final_keeps_a_wake_and_question_at_the_end():
+    text = "会議の続き" * 80 + "エンデルヒールなら休むのは大事？"
+    phrases = srv.Phrases()
+    add(phrases, text, 0)
+    assert len(text) > 300
+    assert phrases.public()[0]["text"] == text
+
+
 def test_public_phrases_are_oldest_first_with_finalisation_time():
     phrases = srv.Phrases(keep=6)
     add(phrases, "一つ目", 0.123)

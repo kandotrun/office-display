@@ -61,7 +61,7 @@ tar cf - -C survey . | $SSH "tar xf - -C $HOME_DIR/room-survey"
 
 # speech (owns the microphone; rough captions)
 $SSH "mkdir -p $HOME_DIR/speech"
-tar cf - -C speech . | $SSH "tar xf - -C $HOME_DIR/speech"
+tar cf - --exclude=./tests --exclude=__pycache__ --exclude=.pytest_cache --exclude=./.venv --exclude=./.venv-whisper --exclude=./.whisper-diagnostic --exclude=./speech.env -C speech . | $SSH "tar xf - -C $HOME_DIR/speech"
 
 # office-stats (minute aggregates, SQLite)
 $SSH "mkdir -p $HOME_DIR/office-stats"

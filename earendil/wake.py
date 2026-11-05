@@ -137,13 +137,13 @@ def _best(aliases, norm, need_cue, threshold):
     return max(hits) if hits else None
 
 
-def detect(text):
+def detect(text, require_cue=False):
     """A Wake for a caption that holds the wake phrase, else None."""
     base, norm, src = _normalised(text)
     if not norm:
         return None
     strong = True
-    hit = _best(STRONG, norm, need_cue=False, threshold=THRESHOLD)
+    hit = _best(STRONG, norm, need_cue=require_cue, threshold=THRESHOLD)
     if hit is None:
         strong = False
         hit = _best(WEAK, norm, need_cue=True, threshold=WEAK_THRESHOLD)

@@ -7,15 +7,31 @@ microphone and serves everything derived from it:
     GET /status   {"db":..., "bands":[...], "text":..., "partial":..., "speaking":bool,
                    "phrases":[{"seq":..., "at":..., "text":...}, ...]}
 
-Captions are deliberately rough: a small Japanese Vosk model fed the
-microphone's mono PCM stream. They are kept in memory for the last few phrases
-and are never written to disk. Nothing here identifies a speaker.
+Captions use Vosk by default. SPEECH_BACKEND=whisper selects optional local
+faster-whisper inference over bounded utterances. Both receive RAM-only mono
+PCM; captions are kept for the last few phrases and never written to disk.
+Nothing here identifies a speaker.
 
 "text" is the caption (the last two phrases younger than SPEECH_CAPTION_HOLD).
 "phrases" are the last SPEECH_MAX_PHRASES final phrases, oldest first, whatever
 their age: "seq" counts final phrases from 1 since this process started (a
 reader that sees it go backwards resets its cursor) and "at" is the unix time
-the phrase was finalised. earendil reads them to hear its wake phrase.
+of captured speech, not later CPU decoding. Earendil uses it for echo rejection.
+
+Whisper settings (all optional except the explicit local model directory):
+    SPEECH_WHISPER_MODEL                 existing local model directory
+    SPEECH_WHISPER_THREADS               2 (CPU int8)
+    SPEECH_WHISPER_PROMPT                empty; proper-name vocabulary only
+    SPEECH_WHISPER_VAD_DB                SPEECH_VAD_DB (-42)
+    SPEECH_WHISPER_PRE_ROLL_SECONDS      0.3
+    SPEECH_WHISPER_SILENCE_SECONDS       0.7
+    SPEECH_WHISPER_MIN_SPEECH_SECONDS    0.3
+    SPEECH_WHISPER_MAX_SECONDS           8
+    SPEECH_WHISPER_QUEUE_SIZE            1 (1..4 pending utterances)
+    SPEECH_WHISPER_MAX_AGE_SECONDS       20 (stale utterances/results are dropped)
+
+Whisper keeps model files on disk but never creates audio files or downloads
+a model at runtime. Its package is imported only when that backend is selected.
 
 Numeric diagnostics expose capture/decode sample counts, queue duration,
 dropped chunks/samples, discarded incomplete capture bytes and last_decode_at.
@@ -31,9 +47,11 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import numpy as np
-import vosk
+
+vosk = None  # imported only when the default backend is initialised
 
 DEVICE = os.environ.get("SPEECH_DEVICE", "plughw:2,0")
+BACKEND = os.environ.get("SPEECH_BACKEND", "vosk").strip().lower()
 MODEL_PATH = os.environ.get("SPEECH_MODEL", os.path.expanduser("~/speech/vosk-model-small-ja-0.22"))
 PORT = int(os.environ.get("SPEECH_PORT", "8098"))
 RATE = 16000
@@ -43,6 +61,8 @@ VAD_DB = float(os.environ.get("SPEECH_VAD_DB", "-42"))
 VAD_HANGOVER = float(os.environ.get("SPEECH_VAD_HANGOVER", "1.5"))
 MAX_PHRASES = int(os.environ.get("SPEECH_MAX_PHRASES", "6"))
 CAPTION_HOLD = float(os.environ.get("SPEECH_CAPTION_HOLD", "25"))
+MAX_PHRASE_CHARS = 300
+WHISPER = None
 
 LOCK = threading.Lock()
 STATE = {
@@ -61,6 +81,16 @@ STATE = {
     "discarded_capture_bytes": 0,
     "last_decode_at": 0.0,
 }
+
+
+class PCMBlock(bytes):
+    """PCM bytes that retain their capture time while waiting in the queue."""
+
+    def __new__(cls, data, captured_at=None, captured_mono=None):
+        result = super().__new__(cls, data)
+        result.captured_at = time.time() if captured_at is None else captured_at
+        result.captured_mono = time.monotonic() if captured_mono is None else captured_mono
+        return result
 
 
 class AudioQueue(queue.Queue):
@@ -90,6 +120,8 @@ QUEUE = AudioQueue(maxsize=40)  # ~4 s; drop oldest rather than fall behind
 
 def queue_audio(data):
     """Retain the newest PCM even when an old block must be evicted."""
+    if not isinstance(data, PCMBlock):
+        data = PCMBlock(data)
     dropped_chunks = dropped_samples = 0
     while True:
         try:
@@ -141,8 +173,9 @@ class Phrases:
         self.keep = keep
         self.seq = 0
         self.items = []  # (seq, unix time, monotonic time, text), oldest first
+        self.started_at = {}
 
-    def add(self, text, at, mono):
+    def add(self, text, at, mono, started_at=None):
         """Record a final phrase; its seq, or None for an empty result."""
         text = text.strip()
         if not text:
@@ -150,6 +183,10 @@ class Phrases:
         self.seq += 1
         self.items.append((self.seq, at, mono, text))
         del self.items[:-self.keep]
+        if started_at is not None:
+            self.started_at[self.seq] = started_at
+        kept = {p[0] for p in self.items}
+        self.started_at = {seq: start for seq, start in self.started_at.items() if seq in kept}
         return self.seq
 
     def _fresh(self, now, hold):
@@ -166,7 +203,9 @@ class Phrases:
 
     def public(self):
         """The /status "phrases" list (a new list: safe to publish as is)."""
-        return [{"seq": seq, "at": round(at, 2), "text": text} for seq, at, _, text in self.items]
+        return [{"seq": seq, "at": round(at, 2), "text": text,
+                 **({"started_at": round(self.started_at[seq], 2)} if seq in self.started_at else {})}
+                for seq, at, _, text in self.items]
 
 
 def bands_from(window):
@@ -198,6 +237,7 @@ def capture():
         window = np.zeros(0, dtype=np.float32)
         last_speech = 0.0
         for chunk in capture_blocks(proc.stdout):
+            captured_at, captured_mono = time.time(), time.monotonic()
             frames = np.frombuffer(chunk, dtype="<i2").reshape(-1, 2)
             mono = frames.mean(axis=1).astype(np.float32) / 32768.0
             rms = float(np.sqrt(np.mean(mono ** 2)))
@@ -215,7 +255,8 @@ def capture():
                 STATE["updated"] = time.time()
             # AcceptWaveform(bytes) expects mono PCM16, not the normalised
             # float32 samples used above for the meter and spectrum.
-            queue_audio((mono * 32768.0).astype("<i2").tobytes())
+            queue_audio(PCMBlock((mono * 32768.0).astype("<i2").tobytes(),
+                                 captured_at, captured_mono))
         try:
             proc.kill()
         except Exception:
@@ -223,33 +264,86 @@ def capture():
         time.sleep(1)
 
 
-def transcribe():
+def load_vosk():
+    global vosk
+    if vosk is None:
+        import vosk as module
+        vosk = module
     model = vosk.Model(MODEL_PATH)
     rec = vosk.KaldiRecognizer(model, RATE)
     rec.SetWords(False)
+    return rec
+
+
+def decoded(samples):
+    with LOCK:
+        STATE["decoded_samples"] += samples
+        STATE["last_decode_at"] = time.time()
+
+
+def publish_phrases(phrases, text=None, at=None, mono=None, started_at=None):
+    now = time.monotonic()
+    with LOCK:
+        if text is not None:
+            phrases.add(text, at, mono, started_at)
+        STATE["text"] = phrases.caption(now, CAPTION_HOLD)
+        STATE["phrases"] = phrases.public()
+        if not STATE["speaking"] and phrases.quiet_for(now, CAPTION_HOLD) > 8:
+            STATE["partial"] = ""
+
+
+def transcribe(rec=None):
+    rec = load_vosk() if rec is None else rec
     phrases = Phrases(MAX_PHRASES)
     while True:
         data = QUEUE.get()
         done = rec.AcceptWaveform(data)
-        with LOCK:
-            STATE["decoded_samples"] += len(data) // 2
-            STATE["last_decode_at"] = time.time()
+        decoded(len(data) // 2)
         if done:
             text = json.loads(rec.Result()).get("text", "")
-            phrases.add(text, time.time(), time.monotonic())
+            at = getattr(data, "captured_at", time.time())
+            mono = getattr(data, "captured_mono", time.monotonic())
+            publish_phrases(phrases, text, at, mono)
         else:
-            partial = json.loads(rec.PartialResult()).get("partial", "").strip()
+            partial = json.loads(rec.PartialResult()).get("partial", "").strip()[:MAX_PHRASE_CHARS]
             with LOCK:
                 STATE["partial"] = partial
-        now = time.monotonic()
-        caption = phrases.caption(now, CAPTION_HOLD)
-        quiet = phrases.quiet_for(now, CAPTION_HOLD)
-        public = phrases.public()
-        with LOCK:
-            STATE["text"] = caption
-            STATE["phrases"] = public
-            if not STATE["speaking"] and quiet > 8:
-                STATE["partial"] = ""
+            publish_phrases(phrases)
+
+
+def load_whisper():
+    import whisper_backend as whisper
+    phrases = Phrases(MAX_PHRASES)
+    decoder = whisper.LocalWhisper(
+        os.path.expanduser(os.environ.get("SPEECH_WHISPER_MODEL", "")),
+        threads=int(os.environ.get("SPEECH_WHISPER_THREADS", "2")),
+        prompt=os.environ.get("SPEECH_WHISPER_PROMPT", ""),
+    )
+    segmenter = whisper.Segmenter(
+        threshold_db=float(os.environ.get("SPEECH_WHISPER_VAD_DB", str(VAD_DB))),
+        pre_roll_seconds=float(os.environ.get("SPEECH_WHISPER_PRE_ROLL_SECONDS", "0.3")),
+        silence_seconds=float(os.environ.get("SPEECH_WHISPER_SILENCE_SECONDS", "0.7")),
+        min_speech_seconds=float(os.environ.get("SPEECH_WHISPER_MIN_SPEECH_SECONDS", "0.3")),
+        max_seconds=float(os.environ.get("SPEECH_WHISPER_MAX_SECONDS", "8")),
+    )
+    backend = whisper.WhisperBackend(
+        decoder, segmenter=segmenter,
+        on_result=lambda text, at, mono, start: publish_phrases(phrases, text, at, mono, start),
+        on_decode=decoded,
+        queue_size=int(os.environ.get("SPEECH_WHISPER_QUEUE_SIZE", "1")),
+        max_age_seconds=float(os.environ.get("SPEECH_WHISPER_MAX_AGE_SECONDS", "20")),
+    )
+    return backend, phrases
+
+
+def transcribe_whisper(backend, phrases):
+    # Segmentation never waits for CPU inference, so the raw microphone queue
+    # keeps draining while the one inference worker is busy.
+    while True:
+        data = QUEUE.get()
+        backend.feed(data, getattr(data, "captured_at", time.time()),
+                     getattr(data, "captured_mono", time.monotonic()))
+        publish_phrases(phrases)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -265,6 +359,9 @@ class Handler(BaseHTTPRequestHandler):
         with LOCK:
             payload = dict(STATE)
         payload["queued_audio_ms"] = QUEUE.milliseconds()
+        payload["backend"] = BACKEND
+        if WHISPER is not None:
+            payload.update(WHISPER.diagnostics())
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -275,9 +372,20 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    global WHISPER
+    # Load before capture starts: model initialisation must not fill/drop the
+    # raw microphone queue, and a missing local model fails without recording.
+    if BACKEND == "vosk":
+        consumer, args = transcribe, (load_vosk(),)
+    elif BACKEND == "whisper":
+        WHISPER, phrases = load_whisper()
+        WHISPER.start()
+        consumer, args = transcribe_whisper, (WHISPER, phrases)
+    else:
+        raise ValueError("SPEECH_BACKEND must be vosk or whisper")
+    threading.Thread(target=consumer, args=args, daemon=True).start()
     threading.Thread(target=capture, name="capture", daemon=True).start()
-    threading.Thread(target=transcribe, name="transcribe", daemon=True).start()
-    print("speech on 127.0.0.1:%d model=%s" % (PORT, MODEL_PATH), flush=True)
+    print("speech on 127.0.0.1:%d backend=%s" % (PORT, BACKEND), flush=True)
     ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
 
 

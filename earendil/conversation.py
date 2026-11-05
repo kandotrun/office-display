@@ -15,6 +15,7 @@
 All state sits behind one lock; the clock is injectable. Nothing here logs
 what was asked or answered: only state names and error codes.
 """
+import math
 import threading
 import time
 
@@ -31,6 +32,7 @@ MAX_VALUES = 3
 MAX_LEVELS = 1200
 MAX_CREDIT = 64
 PHRASE_MAX_AGE = 10.0  # older phrases (a restart, a stalled poller) are not acted on
+PHRASE_MAX_AGE_LIMIT = 60.0
 MAX_WINDOWS = 16
 
 
@@ -38,6 +40,8 @@ class PhraseCursor:
     """New final phrases from successive speech /status documents, each once."""
 
     def __init__(self, max_age=PHRASE_MAX_AGE):
+        if not math.isfinite(max_age) or not 0 < max_age <= PHRASE_MAX_AGE_LIMIT:
+            raise ValueError("phrase max age must be finite and between 0 and 60 seconds")
         self.max_age = max_age
         self.seq = 0
 
@@ -49,14 +53,18 @@ class PhraseCursor:
             if not isinstance(p, dict):
                 continue
             seq, at, text = p.get("seq"), p.get("at"), p.get("text")
-            if isinstance(seq, int) and isinstance(at, (int, float)) and isinstance(text, str):
-                valid.append((seq, float(at), text))
+            start = p.get("started_at", at)
+            if (isinstance(seq, int) and isinstance(at, (int, float)) and math.isfinite(at)
+                    and isinstance(start, (int, float)) and math.isfinite(start)
+                    and start <= at and isinstance(text, str)):
+                valid.append((seq, float(at), text, float(start)))
         if not valid:
             return []
         valid.sort()
         if valid[-1][0] < self.seq:
             self.seq = 0  # speech restarted and counts from 1 again
-        out = [p for p in valid if p[0] > self.seq and now - p[1] <= self.max_age]
+        out = [(seq, at, text) for seq, at, text, start in valid
+               if seq > self.seq and now - start <= self.max_age]
         self.seq = max(self.seq, valid[-1][0])
         return out
 
@@ -74,6 +82,7 @@ class Conversation:
         hold_seconds=25.0,
         echo_seconds=2.0,
         busy_seconds=180.0,
+        require_wake_cue=False,
         log=print,
     ):
         self.persona = persona
@@ -86,6 +95,7 @@ class Conversation:
         self.hold_seconds = hold_seconds
         self.echo_seconds = echo_seconds
         self.busy_seconds = busy_seconds
+        self.require_wake_cue = require_wake_cue
         self.log = log
         self.lock = threading.Lock()
 
@@ -166,8 +176,10 @@ class Conversation:
             self._hold(now)
             self._enter(ANSWERED)
 
-    def _echo(self, at):
-        return any(start <= at and (end is None or at <= end + self.echo_seconds) for start, end in self.windows)
+    def _echo(self, at, started_at=None):
+        captured_start = at if started_at is None else min(started_at, at)
+        return any(start <= at and (end is None or captured_start <= end + self.echo_seconds)
+                   for start, end in self.windows)
 
     @staticmethod
     def _run(actions):
@@ -176,14 +188,14 @@ class Conversation:
 
     # -- inputs ------------------------------------------------------------------------
 
-    def phrase(self, at, text):
-        """A final phrase from speech, finalised at unix time `at`."""
+    def phrase(self, at, text, started_at=None):
+        """A phrase captured by `at`, optionally spanning from `started_at`."""
         actions = []
         with self.lock:
             now = self.clock()
-            if self._echo(at) or self.state in BUSY:
+            if self._echo(at, started_at) or self.state in BUSY:
                 return
-            hit = wake.detect(text)
+            hit = wake.detect(text, require_cue=self.require_wake_cue)
             if self.state == LISTENING:
                 if hit is not None and hit.question:
                     actions = self._ask(hit.question, now)
@@ -224,7 +236,8 @@ class Conversation:
                 self._fail("llm_failed", now)
             elif self.state in DONE and self.deadline is not None and now >= self.deadline:
                 self._idle()
-            self.windows = [w for w in self.windows if w[1] is None or now - w[1] <= 60][-MAX_WINDOWS:]
+            self.windows = [w for w in self.windows if w[1] is None
+                            or now - w[1] <= PHRASE_MAX_AGE_LIMIT + self.echo_seconds][-MAX_WINDOWS:]
 
     # -- from the answer thread ---------------------------------------------------------
 

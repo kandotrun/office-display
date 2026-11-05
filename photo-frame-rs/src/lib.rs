@@ -4,6 +4,8 @@ pub mod art;
 pub mod atlas;
 pub mod decode;
 pub mod depth;
+pub mod earendil;
+pub mod earendil_paint;
 pub mod globe;
 pub mod hand_diagnostics;
 pub mod hand_overlay;

@@ -8,14 +8,42 @@ use crate::layout::Rect;
 pub struct Split {
     pub collage: Rect,
     pub strip: Rect,
+    /// The Earendil values band under the collage, when it is on.
+    pub band: Option<Rect>,
     pub virtual_viewport: [f32; 2],
     pub offset: [f32; 2],
+}
+impl Split {
+    /// The whole right column: the collage, and the band with its gap.
+    pub fn column(&self) -> Rect {
+        let bottom = self.band.map_or(self.collage.y + self.collage.h, |b| b.y + b.h);
+        Rect {
+            h: bottom - self.collage.y,
+            ..self.collage
+        }
+    }
 }
 pub fn outer(width: f32) -> f32 {
     (width * 0.008).clamp(16.0, 36.0)
 }
 pub fn gap(width: f32) -> f32 {
     (width * 0.005).clamp(12.0, 24.0)
+}
+/// The split with the values band taken from the bottom of the collage
+/// (same gap as elsewhere); without it, exactly `split`.
+pub fn split_with(width: f32, height: f32, band: bool) -> Split {
+    let mut s = split(width, height);
+    if band {
+        let h = (s.collage.h * 0.22).clamp(130.0, 260.0);
+        s.collage.h = (s.collage.h - h - gap(width)).max(0.0);
+        s.band = Some(Rect {
+            y: s.collage.y + s.collage.h + gap(width),
+            h,
+            ..s.collage
+        });
+        s.virtual_viewport[1] = s.collage.h + 128.0;
+    }
+    s
 }
 pub fn split(width: f32, height: f32) -> Split {
     let outer = outer(width);
@@ -41,6 +69,7 @@ pub fn split(width: f32, height: f32) -> Split {
     Split {
         collage,
         strip,
+        band: None,
         virtual_viewport: [virtual_width, collage.h + 128.0],
         offset: [strip_w + gap, outer - 80.0],
     }
@@ -277,6 +306,60 @@ mod tests {
                         ..p.card
                     };
                     assert!(inside(card, s.collage), "{w}x{h} {card:?} {:?}", s.collage);
+                }
+            }
+        }
+    }
+    #[test]
+    fn band_sits_under_the_collage_flush_with_it() {
+        for (w, h) in SIZES {
+            let plain = split(w, h);
+            let s = split_with(w, h, true);
+            let band = s.band.expect("band requested");
+            let screen = Rect { x: 0., y: 0., w, h };
+            assert!(inside(band, screen), "{w}x{h} {band:?}");
+            assert_eq!(band.h, (plain.collage.h * 0.22).clamp(130.0, 260.0), "{w}x{h}");
+            assert!((band.y - (s.collage.y + s.collage.h + gap(w))).abs() < 0.01, "same gap: {w}x{h}");
+            assert_eq!((band.x, band.w), (s.collage.x, s.collage.w), "flush with the collage");
+            assert!((band.y + band.h - (plain.collage.y + plain.collage.h)).abs() < 0.01, "bottom unchanged");
+            assert!(!layout::intersects(band, s.collage) && !layout::intersects(band, s.strip));
+            assert_eq!(s.strip, plain.strip, "the strip is unchanged");
+            assert!((s.collage.h - (plain.collage.h - band.h - gap(w))).abs() < 0.01);
+            assert_eq!(s.virtual_viewport, [plain.virtual_viewport[0], s.collage.h + 128.0]);
+            assert_eq!(s.offset, plain.offset);
+            let column = s.column();
+            assert_eq!((column.x, column.y, column.w), (s.collage.x, s.collage.y, s.collage.w));
+            assert!((column.y + column.h - (band.y + band.h)).abs() < 0.01, "collage + gap + band");
+        }
+        let s = split_with(1920., 1080., true);
+        assert!((s.band.unwrap().h - 230.56).abs() < 0.01, "{:?}", s.band);
+        assert_eq!(split_with(3840., 2160., true).band.unwrap().h, 260.0);
+        assert_eq!(split_with(640., 360., true).band.unwrap().h, 130.0);
+    }
+    #[test]
+    fn band_less_split_is_unchanged() {
+        for (w, h) in SIZES {
+            let s = split(w, h);
+            assert_eq!(s, split_with(w, h, false));
+            assert_eq!(s.band, None);
+            assert_eq!(s.column(), s.collage);
+            assert_eq!(s.virtual_viewport, [s.collage.w + 2.0 * outer(w), s.collage.h + 128.0]);
+            assert_eq!(s.collage.h, s.strip.h);
+        }
+    }
+    #[test]
+    fn collage_layouts_land_inside_the_shrunken_collage() {
+        for (w, h) in SIZES {
+            let s = split_with(w, h, true);
+            for aspects in [vec![0.5, 0.6, 0.7, 0.75], vec![1.77, 1.5, 1.4, 2.], vec![0.3], vec![1.0, 1.0]] {
+                let l = layout::choose(&aspects, s.virtual_viewport[0], s.virtual_viewport[1], None, "")
+                    .unwrap_or_else(|| panic!("{w}x{h}: no layout for {aspects:?}"));
+                for p in l.placements {
+                    for r in [p.card, p.foreground] {
+                        let r = Rect { x: r.x + s.offset[0], y: r.y + s.offset[1], ..r };
+                        assert!(inside(r, s.collage), "{w}x{h} {r:?} {:?}", s.collage);
+                        assert!(!layout::intersects(r, s.band.unwrap()), "{w}x{h} {r:?}");
+                    }
                 }
             }
         }

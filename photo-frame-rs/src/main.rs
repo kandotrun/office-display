@@ -8,7 +8,8 @@ use photo_frame_rs::{
     Timeline, art, atlas, depth,
     space::{self, Camera, V3},
     decode::DecodedPhoto,
-    honeypot,
+    earendil::{self, Earendil},
+    earendil_paint, honeypot,
     hud::Hud,
     strip, strip_paint, survey,
     theme::Palette,
@@ -41,8 +42,15 @@ struct Config {
     status_port: u16,
     scale: f32,
     strip: bool,
+    /// The Earendil values band under the collage (only with the strip).
+    earendil: bool,
     lat: f64,
     lon: f64,
+}
+impl Config {
+    fn band(&self) -> bool {
+        self.strip && self.earendil
+    }
 }
 impl Default for Config {
     fn default() -> Self {
@@ -58,12 +66,14 @@ impl Default for Config {
             status_port: 8096,
             scale: 1.0,
             strip: true,
+            earendil: true,
             // The 2F office, 広島市西区楠木町.
             lat: 34.4080,
             lon: 132.4547,
         }
     }
 }
+const HELP: &str = "Native Rust photo-frame prototype\n--fullscreen (default: windowed)\n--camera | --no-camera (default: disabled; shared loopback MJPEG at source rate, target 15fps)\n--camera-port N (loopback MJPEG source port; default 8082)\n--live-tile | --no-live-tile (draw the live camera into the largest collage card instead of the corner preview; implies camera)\n--run-seconds 1..3600 (automatic window close)\n--status-port 8096 or 8098..8199 (GET /health /status, loopback only)\n--scale 0.75..3 (physical pixels per logical egui point; default 1)\n--no-backdrops (disable small RAM-only blurred covers)\n--gestures (display-only overlay; implies camera mirror)\n--gesture-controls (explicit native photo navigation: screen left=next,right=previous; implies gestures/camera)\n--no-gesture-controls (display only)\n--no-strip (full-width collage without the info strip / atlas)\n--no-earendil (no Earendil values band or conversation panel under the collage; the collage takes the space back)\n--lat D --lon D (office position for the sun and the map marker; default 34.4080 132.4547 (Hiroshima office))\nPhoto source fixed: loopback 8081; atlas loopback 8099; Earendil agent loopback 8101 (read-only GET). No external URLs, credential, file input, HTTP write controls, video or gaze.";
 fn config() -> Result<Option<Config>, &'static str> {
     let env = |k: &str| std::env::var(k).ok();
     config_with(env("ATLAS_LAT"), env("ATLAS_LON"), std::env::args().skip(1))
@@ -117,6 +127,7 @@ fn config_with(
             "--no-camera" => c.camera = false,
             "--no-backdrops" => c.backdrops = false,
             "--no-strip" => c.strip = false,
+            "--no-earendil" => c.earendil = false,
             "--lat" => {
                 c.lat = args
                     .next()
@@ -154,9 +165,7 @@ fn config_with(
                     .ok_or("invalid_scale")?;
             }
             "--help" => {
-                println!(
-                    "Native Rust photo-frame prototype\n--fullscreen (default: windowed)\n--camera | --no-camera (default: disabled; shared loopback MJPEG at source rate, target 15fps)\n--camera-port N (loopback MJPEG source port; default 8082)\n--live-tile | --no-live-tile (draw the live camera into the largest collage card instead of the corner preview; implies camera)\n--run-seconds 1..3600 (automatic window close)\n--status-port 8096 or 8098..8199 (GET /health /status, loopback only)\n--scale 0.75..3 (physical pixels per logical egui point; default 1)\n--no-backdrops (disable small RAM-only blurred covers)\n--gestures (display-only overlay; implies camera mirror)\n--gesture-controls (explicit native photo navigation: screen left=next,right=previous; implies gestures/camera)\n--no-gesture-controls (display only)\n--no-strip (full-width collage without the info strip / atlas)\n--lat D --lon D (office position for the sun and the map marker; default 34.4080 132.4547 (Hiroshima office))\nPhoto source fixed: loopback 8081; atlas loopback 8099. No external URLs, credential, file input, HTTP write controls, video or gaze."
-                );
+                println!("{HELP}");
                 return Ok(None);
             }
             _ => return Err("invalid_argument"),
@@ -436,6 +445,7 @@ struct Feeds {
     atlas: Option<(atlas::AtlasSlot, SyncSender<Vec<String>>)>,
     honeypot: Option<honeypot::HoneypotSlot>,
     survey: Option<survey::SurveySlot>,
+    earendil: Option<earendil::EarendilSlot>,
 }
 struct App {
     config: Config,
@@ -470,6 +480,9 @@ struct App {
     navigation_last_result: &'static str,
     navigation_notice: Option<(&'static str, f64)>,
     hud: Hud,
+    /// The values band and the conversation panel; None without the band.
+    earendil: Option<Earendil>,
+    earendil_art: earendil_paint::Art,
 }
 impl App {
     fn new(
@@ -523,6 +536,8 @@ impl App {
             hud: feeds.atlas.map_or_else(Hud::default, |(slot, names)| {
                 Hud::new(Some(slot), Some(names), feeds.honeypot, feeds.survey)
             }),
+            earendil: feeds.earendil.map(|slot| Earendil::new(Some(slot))),
+            earendil_art: earendil_paint::Art::default(),
         }
     }
     /// Whether the layout must reserve space for the floating corner preview.
@@ -827,7 +842,8 @@ impl eframe::App for App {
                 let canvas = ui.max_rect();
                 size = [canvas.width(), canvas.height()];
                 // With the strip, the collage lives in a virtual viewport drawn shifted.
-                let split = self.config.strip.then(|| strip::split(size[0], size[1]));
+                let band = self.earendil.is_some();
+                let split = self.config.strip.then(|| strip::split_with(size[0], size[1], band));
                 let origin;
                 (scene_size, origin) = split.map_or((size, canvas.min), |s| {
                     (s.virtual_viewport, canvas.min + Vec2::new(s.offset[0], s.offset[1]))
@@ -1081,6 +1097,24 @@ impl eframe::App for App {
                         }
                     }
                 }
+                // After the collage (and its live tile): the values band
+                // under it, and the conversation panel over the whole column.
+                if let (Some(split), Some(model)) = (&split, self.earendil.as_mut()) {
+                    model.tick(now, unix);
+                    let (rev, emblem) = model.emblem();
+                    self.earendil_art.sync(ctx, rev, emblem);
+                    if let Some(band) = split.band {
+                        earendil_paint::paint(
+                            &painter,
+                            rect(band, canvas.min),
+                            rect(split.column(), canvas.min),
+                            &palette,
+                            model,
+                            &self.earendil_art,
+                            now,
+                        );
+                    }
+                }
             });
         if let Ok(mut s) = self.state.lock() {
             s.gesture_navigation_enabled = self.config.gesture_controls;
@@ -1089,6 +1123,12 @@ impl eframe::App for App {
             s.theme_mood = self.hud.mood.map_or("none", |m| m.name());
             s.atlas_state = self.hud.state;
             s.strip_view = self.hud.view;
+            if let Some(model) = &self.earendil {
+                s.earendil_state = model.state_name(now);
+                s.earendil_conversation = model.conversation();
+                s.earendil_values = model.values_loaded();
+                s.earendil_emblem = if model.emblem().1.is_some() { "loaded" } else { "fallback" };
+            }
             s.navigation_pending = self.pending_navigation.is_some();
             s.navigation_requests = self.action_gate.accepted;
             s.navigation_dispatched = self.navigation_dispatched;
@@ -1259,12 +1299,21 @@ fn run(config: Config) -> Result<(), &'static str> {
     } else {
         None
     };
+    let earendil_feed = if config.band() {
+        let (slot, handle) = earendil::start(earendil::EARENDIL_PORT, stop.clone(), camera_wake.clone())
+            .map_err(|_| "earendil_worker_failed")?;
+        runtime.handles.push(handle);
+        Some(slot)
+    } else {
+        None
+    };
     let feeds = Feeds {
         camera: camera_slot,
         hand: hand_slot,
         atlas: atlas_feed,
         honeypot: honeypot_feed,
         survey: survey_feed,
+        earendil: earendil_feed,
     };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -1344,6 +1393,8 @@ mod tests {
             navigation_last_result: "idle",
             navigation_notice: None,
             hud: Hud::default(),
+            earendil: None,
+            earendil_art: earendil_paint::Art::default(),
         };
         (app, results, commands)
     }
@@ -1557,6 +1608,26 @@ mod tests {
         let c = env("35.0", "135.75", &["--lat", "34.0"]).unwrap().unwrap();
         assert_eq!(c.lat, 34.0, "flags win over the environment");
         assert_eq!(env("abc", "1", &[]).err(), Some("invalid_lat"));
+    }
+    #[test]
+    fn earendil_band_comes_with_the_strip_and_can_opt_out() {
+        let parse = |args: &[&str]| config_from(args.iter().map(|s| s.to_string()));
+        let c = parse(&[]).unwrap().unwrap();
+        assert!(c.earendil && c.band());
+        let c = parse(&["--no-earendil"]).unwrap().unwrap();
+        assert!(!c.earendil && !c.band() && c.strip, "the strip stays, the band goes");
+        let c = parse(&["--no-strip"]).unwrap().unwrap();
+        assert!(c.earendil && !c.band(), "no strip, no band");
+        assert_eq!(parse(&["--earendil"]).err(), Some("invalid_argument"));
+        assert!(HELP.contains("--no-earendil"));
+        assert!(parse(&["--help"]).unwrap().is_none());
+    }
+    #[test]
+    fn earendil_status_fields_start_disabled() {
+        let (app, _results, _commands) = fixture();
+        assert!(app.earendil.is_none());
+        let s = app.state.lock().unwrap();
+        assert_eq!((s.earendil_state, s.earendil_conversation, s.earendil_values, s.earendil_emblem), ("disabled", 0, 0, "disabled"));
     }
     #[test]
     fn live_tile_implies_camera_and_can_opt_out() {

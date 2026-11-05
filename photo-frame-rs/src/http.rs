@@ -25,27 +25,31 @@ pub fn get(port: u16, path: &str, max_body: usize) -> Result<Response, &'static 
 pub fn hand_status() -> Result<Response, &'static str> {
     get_with_deadline(8097, "/status", 32768, Duration::from_millis(250))
 }
+/// The fixed set of loopback paths this app may ask for, per port.
+fn path_allowed(port: u16, path: &str) -> bool {
+    (path == "/api/photos"
+        || path == "/snapshot.jpg"
+        || path == "/status"
+        || path.starts_with("/photos/")
+        || (port == 8097 && path == "/status")
+        || (port == 8100 && path == "/status.json")
+        || (port == 8101 && (path == "/values.json" || path == "/emblem.json"))
+        || (port == 8099
+            && (path == "/status"
+                || path.starts_with("/map/")
+                || path.starts_with("/globe/")
+                || path.starts_with("/photo/"))))
+        && path.is_ascii()
+        && !path.contains(['\r', '\n', '?', '#', '\\'])
+        && !path.contains("..")
+}
 fn get_with_deadline(
     port: u16,
     path: &str,
     max_body: usize,
     total: Duration,
 ) -> Result<Response, &'static str> {
-    if !(path == "/api/photos"
-        || path == "/snapshot.jpg"
-        || path == "/status"
-        || path.starts_with("/photos/")
-        || (port == 8097 && path == "/status")
-        || (port == 8100 && path == "/status.json")
-        || (port == 8099
-            && (path == "/status"
-                || path.starts_with("/map/")
-                || path.starts_with("/globe/")
-                || path.starts_with("/photo/"))))
-        || !path.is_ascii()
-        || path.contains(['\r', '\n', '?', '#', '\\'])
-        || path.contains("..")
-    {
+    if !path_allowed(port, path) {
         return Err("invalid_request_path");
     }
     let started = Instant::now();
@@ -241,6 +245,19 @@ mod tests {
         assert!(get_with_deadline(port, "/api/photos", 100, Duration::from_millis(120)).is_err());
         assert!(start.elapsed() < Duration::from_millis(400));
         handle.join().unwrap();
+    }
+    #[test]
+    fn earendil_documents_only_on_its_own_port() {
+        for path in ["/status", "/values.json", "/emblem.json"] {
+            assert!(path_allowed(8101, path), "{path}");
+        }
+        for path in ["/ask", "/values.json?x=1", "/emblem.json/../x", "/photos/../values.json"] {
+            assert!(!path_allowed(8101, path), "{path}");
+        }
+        for port in [8081, 8099, 8100] {
+            assert!(!path_allowed(port, "/values.json") && !path_allowed(port, "/emblem.json"));
+        }
+        assert_eq!(get(1, "/emblem.json", 100).unwrap_err(), "invalid_request_path");
     }
     #[test]
     fn rejects_arbitrary_paths() {

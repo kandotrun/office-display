@@ -18,6 +18,7 @@ photos/
 
 # Secrets and machine-local state
 .env
+*.env
 *.key
 *.pem
 id_*

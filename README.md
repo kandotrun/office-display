@@ -33,11 +33,14 @@
                     │   1分ごとの集約をSQLiteへ / 週間グリッドを返す      │
                     │                                                    │
   OSM / 気象庁 / ──▶ │  atlas (loopback :8099) ── 地図・雨雲・地球 ──▶ 情報帯 │
-  NASA / Nominatim  │   外へ出るのはここだけ。ディスクキャッシュ付き      │
+  NASA / Nominatim  │   公開データを取得。ディスクキャッシュ付き          │
+                    │                                                    │
+  Anthropic API ◀──▶ │  earendil (loopback :8101) ◀── speech (8098) の字幕 │
+  earendil.com ───▶ │   呼びかけを聞いて答え、声で話す ──▶ Values の帯    │
                     └────────────────────────────────────────────────────┘
 ```
 
-- アプリ（photo-frame-rs）は `127.0.0.1` としか話しません。このリポジトリのサービスで外部と通信するのは `atlas` だけで、地図タイル・雨雲・天気・衛星画像を取得してループバックで配ります（写真は別管理の photo-manager が Immich から取得します）。
+- アプリ（photo-frame-rs）は `127.0.0.1` としか話しません。このリポジトリのサービスで外部と通信するのは `atlas` と `earendil` だけです。`atlas` は地図タイル・雨雲・天気・衛星画像を、`earendil` はロゴと Values の原文を取得し、呼びかけられた質問の書き起こしだけを Anthropic API へ送ります（写真は別管理の photo-manager が Immich から取得します）。
 - 顔検出は「何人いるか」だけを使い、身元特定・履歴保存はしません。
 - カメラ映像はメモリ上だけで扱い、ディスクに残しません。
 
@@ -57,6 +60,7 @@
 | `--status-port 8096` | `GET /health` `/status`（ループバック限定） |
 | `--run-seconds N` | 自動終了（動作確認用） |
 | `--no-strip` | 右の情報帯を出さず、以前の全幅コラージュに戻す（atlas にも接続しない） |
+| `--no-earendil` | コラージュの下の Values の帯と相談画面を出さない（earendil にも接続しない） |
 | `--lat D` / `--lon D` | オフィスの位置。太陽高度（配色）と地図・地球のマーカーに使う（既定は広島のオフィス） |
 
 `--live-tile` は、いちばん大きなカードを選び、そこにライブ映像を描きます。写真のレイアウト計算には手を入れず、描画だけを差し替えるので、レイアウトの不変条件を壊しません。
@@ -211,8 +215,11 @@ MJPEGの各パートには `X-Frame-Sequence` と RFC3339 の `X-Frame-Timestamp
 マイクの持ち主です。ALSAは1プロセスしか掴めないので、録音はここだけが行い、音量・スペクトラム・字幕をまとめて配ります。
 
 ```
-GET /status  {"db":…, "bands":[…], "text":…, "partial":…, "speaking":bool}
+GET /status  {"db":…, "bands":[…], "text":…, "partial":…, "speaking":bool,
+              "phrases":[{"seq":41, "at":…, "text":"エンゼル ヒール なら どう 思う"}, …]}
 ```
+
+`phrases` は確定した直近のフレーズ（既定6つ）に通し番号を付けたもので、`earendil` が呼びかけを聞き取るのに使います。番号は再起動で1に戻ります。
 
 - **字幕はざっくり**です。日本語の小さいVoskモデルに、発話区間だけを流しています
 - 画面に出るだけ。**ディスクには一切書きません**。話者も特定しません
@@ -220,6 +227,96 @@ GET /status  {"db":…, "bands":[…], "text":…, "partial":…, "speaking":boo
 - 部屋は無音 −60 dBFS / 発話 −24 dBFS 程度なので、VADで発話区間を切り出してから認識します
 
 `room-survey` はこのサービスから音量・スペクトラム・字幕を受け取り、計測図の下部に字幕を描きます。表示中は `LISTENING` を出します。
+
+## earendil
+
+Earendil Inc. の [Values](https://earendil.com/values/) を常に画面に出し、テレビに話しかけると「エンデルヒールならどうするか」を答えるループバックのサービスです（`127.0.0.1:8101`）。社内では Earendil を親しみをこめて「エンデルヒール」と呼んでいます。「ヒンメルならそうした」のように、迷ったときの道しるべにするためのものです。
+
+### 画面
+
+- **Values の帯**: コラージュの下に、すりガラスの帯が常にあります。左に Earendil のロゴ（ゆっくり呼吸するように光り、先端で星がまたたく）、右に `EARENDIL · VALUES 03 / 14`、英語の名前、日本語の要約。18秒ごとに次の項目へ入れ替わります（Values 7つと Operating Principles 7つ）
+- **相談画面**: 呼びかけられると帯がコラージュ全体へ広がり、ロゴが前に出てきます
+  - 聞いている間は聞こえた言葉を出し、考えている間はロゴに光が走ります
+  - 話している間はロゴが声の大きさに合わせて脈打ち、波紋が広がります
+  - 答えは大きな文字で出し、根拠にした Values を下に並べます
+  - 話し終えてから25秒たつと帯に戻り、答えが拠った Value を最初に表示します
+- 小さく「Earendil の Values をもとに AI が答えています」と出します。Earendil Inc. の公式な見解ではありません
+
+### 話しかけ方
+
+「**エンデルヒールなら**、締め切り前の徹夜ってどう思う？」のように、名前と質問を一息で言います。名前だけ言って間を置き、8秒以内に質問しても構いません。
+
+字幕は Vosk の小さいモデルなので、名前はまず正しく書き起こされません。実測した聞き間違い（「エンゼル ヒール」「エンゼル ビール」「えー で いる なら」など）をかな読みで照合しています。
+
+- 「エンゼル ヒール」のような**強い候補**は、それだけで反応します
+- 「エネルギー」のような普通の言葉でもある**弱い候補**は、完全一致し、すぐ後に「なら」「さん」などが続くときだけ反応します
+
+テレビ自身の声が字幕に入るので、話している間と話し終えて2秒の間の字幕は無視します。
+
+### 答え
+
+- Claude（`claude-opus-5-5`、effort `low`、ストリーミング）に、Values の要約と原文を前提として渡します。答えは2〜4文の話し言葉で「エンデルヒールなら、」から始まります。人格の指示は `earendil/persona.md` にあります
+- サーバー側のフォールバック（`fallbacks: "default"`）を有効にしています。安全分類器が断ったときは別のモデルが続きを答えます（`EARENDIL_FALLBACKS=none` で無効）
+- 文が出来上がるたびに読み上げへ回すので、答えを書き終える前に話し始めます
+- 続けて聞けるよう、直近3往復を3分間だけメモリに持ちます
+
+### 声
+
+| `EARENDIL_TTS` | 使うもの |
+|---|---|
+| `auto`（既定） | VOICEVOX が動いていればそれ、なければ Open JTalk、macOS なら `say`、どれもなければ字幕だけ |
+| `voicevox` | [VOICEVOX ENGINE](https://github.com/VOICEVOX/voicevox_engine)（`127.0.0.1:50021`、話者は既定 13 = 青山龍星）。クレジットを画面に出します |
+| `openjtalk` | `open_jtalk`（`sudo apt install open-jtalk open-jtalk-mecab-naist-jdic hts-voice-nitech-jp-atr503-m001`） |
+| `say` / `none` | 開発用の macOS の声 / 声なし |
+
+再生は `aplay -D $EARENDIL_AUDIO_OUT`（配備では `AUDIO_OUT`、既定 `default`）です。合成した音声は `/run/earendil` に再生中だけ置き、すぐ消します。
+
+VOICEVOX ENGINE は読み上げる文を URL に載せて受け取るので、エンジンのアクセスログに答えの文が残ります。動かすときはログを捨ててください（systemd なら `StandardOutput=null`、docker なら `--log-driver none`）。
+
+### 取得するもの・送るもの
+
+| 相手 | 内容 | 頻度 |
+|---|---|---|
+| earendil.com | ロゴの SVG（`EARENDIL_EMBLEM_URL`。ローカルのパスも可）と Values のページ本文 | 起動時と1日1回。`/var/cache/earendil` にキャッシュ |
+| Anthropic API | 呼びかけを含む発話の書き起こし（質問）と直近の会話 | 呼びかけられたときだけ |
+
+- **音声はこの機械から出ません**。送るのは書き起こした文字だけです
+- 質問と答えはログにもディスクにも残しません。ログには状態名とエラーの種類だけを出します
+- ロゴと Values の原文はリポジトリに入れていません（実行時に取得）。`earendil/values.json` の英語の名前は原文どおり、日本語の要約はチームが書いたものです
+
+### 設定
+
+API キーは表示機の `~/earendil/earendil.env`（`chmod 600`、リポジトリには入れない）に置きます。ユニットが `EnvironmentFile=` で読みます。キーがなくても帯は動き、質問には「APIキーが設定されていません」と答えます。
+
+```sh
+# 表示機で
+cat > ~/earendil/earendil.env <<'EOF'
+ANTHROPIC_API_KEY=...
+# EARENDIL_TTS=openjtalk
+EOF
+chmod 600 ~/earendil/earendil.env
+sudo systemctl restart earendil
+```
+
+| 変数 | 既定 | 意味 |
+|---|---|---|
+| `EARENDIL_PERSONA` | `エンデルヒール` | 呼び名（答えの書き出しと画面の名前） |
+| `EARENDIL_MODEL` / `EARENDIL_EFFORT` | `claude-opus-5-5` / `low` | モデルと考える深さ |
+| `EARENDIL_EMBLEM_URL` | earendil.com のロゴ | 別のロゴにしたいときは SVG の URL かパス |
+| `EARENDIL_LISTEN_SECONDS` / `EARENDIL_HOLD_SECONDS` | `8` / `25` | 名前だけのあと質問を待つ秒数 / 答えを出しておく秒数 |
+
+全部の変数は `earendil/earendil_server.py` の冒頭にあります。
+
+### 手元での確認
+
+```sh
+just dev-photos             # 写真
+just dev-earendil-fake      # 台本どおりに動く偽の earendil（キーもマイクも不要）。--state speaking などで固定
+just dev-frame              # 帯と相談画面を見る
+
+just dev-earendil           # 本物（キーが要る）。EARENDIL_TTS=say で Mac から声が出る
+just dev-ask "締め切り前の徹夜ってどう思う"   # 呼びかけを聞いたことにして質問する
+```
 
 ## office-stats
 
@@ -249,7 +346,9 @@ export DISPLAY_HOST=<display-host>
 export DISPLAY_USER=<display-user>
 export APP_ROOT=/home/$DISPLAY_USER/photo-frame-rs
 
-# Python サービス（atlas・room-survey など）とユニットを入れる。初回と、それらを変えたとき
+# Python サービス（atlas・room-survey・earendil など）とユニットを入れる。初回と、それらを変えたとき
+# earendil の声を出す ALSA デバイス（テレビの HDMI）。既定は default
+# export AUDIO_OUT=hdmi:CARD=PCH,DEV=0
 # オフィスの位置と予報区は既定で広島（atlas の表）。別の場所に置くときだけ上書きする
 # export ATLAS_LAT=... ATLAS_LON=... ATLAS_FORECAST_OFFICE=... ATLAS_FORECAST_AREA=... ATLAS_TEMP_POINT=...
 ./deploy/install-units.sh
@@ -260,9 +359,10 @@ export APP_ROOT=/home/$DISPLAY_USER/photo-frame-rs
 
 `install-units.sh` は次を行います。
 
-1. `atlas/`・`survey/`・`speech/`・`stats/`・`presence/` を表示機へコピー
-2. systemd ユニットを描画して設置（`ATLAS_*` はここでユニットに入る）
-3. 有効化し、`atlas.service` は起動・再起動して新しいコードを反映
+1. `atlas/`・`survey/`・`speech/`・`stats/`・`presence/`・`earendil/` を表示機へコピー（`earendil.env` には触れない）
+2. `~/earendil/.venv` を作り、`anthropic` SDK を入れる（Debian/Ubuntu では `python3-venv` が要る）
+3. systemd ユニットを描画して設置（`ATLAS_*` と `AUDIO_OUT` はここでユニットに入る）
+4. 有効化し、`atlas`・`earendil` は起動・再起動、`speech` は再起動して新しいコードを反映
 
 `build-and-deploy.sh` は次を行います。
 
@@ -301,8 +401,10 @@ ssh "$DISPLAY_USER@$DISPLAY_HOST" '
 
 ## 方針
 
-- **認証情報を置かない** — アプリはループバックのHTTPを読むだけで、トークンもAPIキーも持ちません。
+- **認証情報を置かない** — アプリはループバックのHTTPを読むだけで、トークンもAPIキーも持ちません。Anthropic API のキーは表示機の `~/earendil/earendil.env`（`chmod 600`）にだけあり、`earendil` だけが読みます。
 - **写真を同梱しない** — 画像は実行時に取得します。
-- **外へ出るのは atlas だけ**（このリポジトリの中では） — 公開データ（地図・気象・衛星画像）を取りに行くだけで、送るのはタイル座標と丸めた撮影地の座標だけです。写真名はログにもディスクにも残しません。
+- **外へ出るのは atlas と earendil だけ**（このリポジトリの中では）
+  - `atlas` は公開データ（地図・気象・衛星画像）を取りに行くだけで、送るのはタイル座標と丸めた撮影地の座標だけです。写真名はログにもディスクにも残しません
+  - `earendil` が送るのは、呼びかけられたときの質問の書き起こしだけです。音声は送りません
 - **顔は数えるだけ** — 身元特定・保存はしません。
 - **落ちても戻る** — systemd `Restart=always`、検出器異常時は明るいまま。

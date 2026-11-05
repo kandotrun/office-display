@@ -1,0 +1,90 @@
+{
+  "source": "https://earendil.com/values/",
+  "note": "English titles from the page; the Japanese lines are our own summaries.",
+  "values": [
+    {
+      "title": "Be Compassionate",
+      "kind": "value",
+      "ja": "思いやりを持つ",
+      "gloss": "人は仕事の前に人。誰にでも調子の悪い日がある。まず寛大さを、そして相手の善意を信じよう。"
+    },
+    {
+      "title": "Focused Excellence",
+      "kind": "value",
+      "ja": "集中して、卓越を",
+      "gloss": "動かせることに集中して、誇りをもって届ける。磨くのはプロセスより結果。"
+    },
+    {
+      "title": "We not I",
+      "kind": "value",
+      "ja": "「私」ではなく「私たち」",
+      "gloss": "最高のチームは個の総和を超える。ひとりでは謙虚に、チームとしては自信をもって。"
+    },
+    {
+      "title": "Family First",
+      "kind": "value",
+      "ja": "家族が第一",
+      "gloss": "人生を形づくるのは大切な人との関係。高い基準で働くけれど、ぶつかったら家族を優先する。"
+    },
+    {
+      "title": "Originally Curious",
+      "kind": "value",
+      "ja": "自分の頭で、好奇心を",
+      "gloss": "知らないことの多さを認める謙虚さと、通説を自分の頭で問い直す自信を。知っていることは惜しまず教える。"
+    },
+    {
+      "title": "Transparently Vulnerable",
+      "kind": "value",
+      "ja": "弱さを見せる勇気",
+      "gloss": "弱さを見せれば信頼が、隠せば距離が生まれる。憶測より一次情報へ。ミスを打ち明けたら称えよう。"
+    },
+    {
+      "title": "Positive Intentions & Outcomes",
+      "kind": "value",
+      "ja": "良い意図と、良い結果",
+      "gloss": "大切な人の目を見て、作ったものの目的も負の側面も語れて、誇れること。北極星はいつも北に。"
+    },
+    {
+      "title": "We are the Agents",
+      "kind": "principle",
+      "ja": "主体は私たち",
+      "gloss": "意図を持つのは人間。道具は使い倒すけれど、頭は鈍らせない。斧はあなた自身だ。"
+    },
+    {
+      "title": "Craft Beauty",
+      "kind": "principle",
+      "ja": "美しく作る",
+      "gloss": "世界には美しさと手仕事が必要。あなたにしか作れない美しさがある。努力と熟練の両方を称える。"
+    },
+    {
+      "title": "Be Charming",
+      "kind": "principle",
+      "ja": "感じよく",
+      "gloss": "追い込まれたときこそ礼儀と愛嬌を。周りを軽くして、できれば笑顔に。伝わっていると思わず、伝えすぎるくらいに。"
+    },
+    {
+      "title": "Thoughtful but Relentless",
+      "kind": "principle",
+      "ja": "思慮深く、そして粘り強く",
+      "gloss": "力が大きくなるほど判断は慎重に。でも最善の道を決めたら、迷わずやり抜く。"
+    },
+    {
+      "title": "Technology is the Means, not the End",
+      "kind": "principle",
+      "ja": "技術は手段であって目的ではない",
+      "gloss": "ソフトウェアは得意な道具にすぎない。スプレッドシートの方がうまくいくなら、迷わずそうする。"
+    },
+    {
+      "title": "Ambitious Goals, Credible Steps",
+      "kind": "principle",
+      "ja": "大胆な目標、確かな一歩",
+      "gloss": "とてつもなく大きな目標を恐れない。そのぶん計画は緻密に。空へ登る一段一段に納得してから進む。"
+    },
+    {
+      "title": "Radical Responsibility, Generous Recognition",
+      "kind": "principle",
+      "ja": "徹底した責任、惜しみない称賛",
+      "gloss": "一人ひとりがオーナーとして考える。どの仕事にも明確な持ち主を。自分より先に仲間の貢献を称える。"
+    }
+  ]
+}

@@ -9,13 +9,19 @@ lon := env_var_or_default("ATLAS_LON", "132.4547")
 default: test
 
 # Run every test suite
-test: test-rust test-atlas
+test: test-rust test-atlas test-speech test-earendil
 
 test-rust:
     cd photo-frame-rs && cargo test --locked
 
 test-atlas:
     {{py}} --with pytest python -m pytest atlas/tests -q
+
+test-speech:
+    {{py}} --with pytest python -m pytest speech/tests -q
+
+test-earendil:
+    uv run --no-project --with anthropic --with pytest python -m pytest earendil/tests -q
 
 # Generate sample photos (some with GPS) and serve them like photo-manager on :8081
 dev-photos count="12":
@@ -29,3 +35,16 @@ dev-atlas:
 # Run the photo frame in a window
 dev-frame *args:
     cd photo-frame-rs && cargo run --release --locked -- --lat {{lat}} --lon {{lon}} {{args}}
+
+# Run the Earendil agent on :8101 (answers need ANTHROPIC_API_KEY; EARENDIL_TTS=say speaks on a Mac)
+dev-earendil:
+    cd earendil && EARENDIL_CACHE_DIR={{scratch}}/earendil-cache uv run --no-project --with anthropic python earendil_server.py
+
+# A scripted stand-in for the agent on :8101 (no key, no microphone), for screen work
+dev-earendil-fake *args:
+    uv run --no-project python dev/fake_earendil.py {{args}}
+
+# Ask the running agent as if it had heard the wake phrase: just dev-ask "締め切り前の徹夜ってどう思う"
+dev-ask text:
+    python3 -c 'import json, sys; print(json.dumps({"text": sys.argv[1]}, ensure_ascii=False))' {{quote(text)}} \
+        | curl -s -X POST -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:8101/ask

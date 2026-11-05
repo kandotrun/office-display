@@ -80,6 +80,12 @@ pub struct Status {
     pub theme_mood: &'static str,
     pub atlas_state: &'static str,
     pub strip_view: &'static str,
+    /// The Earendil band: the agent's state and counts only; the
+    /// question and answer text never leave the frame's memory.
+    pub earendil_state: &'static str,
+    pub earendil_conversation: u64,
+    pub earendil_values: usize,
+    pub earendil_emblem: &'static str,
     pub gaze_enabled: bool,
     /// HTTP remains read-only even when native gesture navigation is opted in.
     pub write_controls_enabled: bool,
@@ -184,6 +190,10 @@ impl Status {
             theme_mood: "none",
             atlas_state: "disabled",
             strip_view: "preparing",
+            earendil_state: "disabled",
+            earendil_conversation: 0,
+            earendil_values: 0,
+            earendil_emblem: "disabled",
             gaze_enabled: false,
             write_controls_enabled: false,
             gesture_navigation_enabled: false,
@@ -355,6 +365,23 @@ mod tests {
             assert!(!response.contains("Access-Control-Allow-Origin"));
             let body = response.split_once("\r\n\r\n").unwrap().1;
             assert!(serde_json::from_str::<serde_json::Value>(body).is_ok());
+        }
+    }
+    #[test]
+    fn earendil_fields_carry_state_never_conversation_text() {
+        let mut s = Status::new(8081, false, 8096, false, 1.);
+        assert_eq!(s.earendil_state, "disabled");
+        s.earendil_state = "speaking";
+        s.earendil_conversation = 12;
+        s.earendil_values = 14;
+        s.earendil_emblem = "loaded";
+        let json: serde_json::Value = serde_json::from_slice(&reply(b"GET /status HTTP/1.1\r\n\r\n", &s).1).unwrap();
+        assert_eq!(json["earendil_state"], "speaking");
+        assert_eq!(json["earendil_conversation"], 12);
+        assert_eq!(json["earendil_values"], 14);
+        assert_eq!(json["earendil_emblem"], "loaded");
+        for key in json.as_object().unwrap().keys() {
+            assert!(!["question", "answer", "heard"].iter().any(|k| key.contains(k)), "{key}");
         }
     }
     #[test]

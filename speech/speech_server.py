@@ -7,15 +7,19 @@ microphone and serves everything derived from it:
     GET /status   {"db":..., "bands":[...], "text":..., "partial":..., "speaking":bool,
                    "phrases":[{"seq":..., "at":..., "text":...}, ...]}
 
-Captions are deliberately rough: a small Japanese Vosk model fed only the
-speech segments. They are kept in memory for the last few phrases and are never
-written to disk. Nothing here identifies a speaker.
+Captions are deliberately rough: a small Japanese Vosk model fed the
+microphone's mono PCM stream. They are kept in memory for the last few phrases
+and are never written to disk. Nothing here identifies a speaker.
 
 "text" is the caption (the last two phrases younger than SPEECH_CAPTION_HOLD).
 "phrases" are the last SPEECH_MAX_PHRASES final phrases, oldest first, whatever
 their age: "seq" counts final phrases from 1 since this process started (a
 reader that sees it go backwards resets its cursor) and "at" is the unix time
 the phrase was finalised. earendil reads them to hear its wake phrase.
+
+Numeric diagnostics expose capture/decode sample counts, queue duration,
+dropped chunks/samples, discarded incomplete capture bytes and last_decode_at.
+They contain no audio or transcription content.
 """
 import json
 import os
@@ -49,8 +53,85 @@ STATE = {
     "speaking": False,
     "updated": 0.0,
     "phrases": [],
+    "sample_rate": RATE,
+    "capture_samples": 0,
+    "decoded_samples": 0,
+    "dropped_chunks": 0,
+    "dropped_samples": 0,
+    "discarded_capture_bytes": 0,
+    "last_decode_at": 0.0,
 }
-QUEUE = queue.Queue(maxsize=40)  # ~4 s; drop oldest rather than fall behind
+
+
+class AudioQueue(queue.Queue):
+    """A bounded PCM16 queue with an exact, content-free backlog duration."""
+
+    def __init__(self, maxsize):
+        self.pending_bytes = 0
+        super().__init__(maxsize=maxsize)
+
+    # Queue calls these while holding its mutex.
+    def _put(self, data):
+        super()._put(data)
+        self.pending_bytes += len(data)
+
+    def _get(self):
+        data = super()._get()
+        self.pending_bytes -= len(data)
+        return data
+
+    def milliseconds(self):
+        with self.mutex:
+            return round(self.pending_bytes * 1000.0 / (RATE * 2), 3)
+
+
+QUEUE = AudioQueue(maxsize=40)  # ~4 s; drop oldest rather than fall behind
+
+
+def queue_audio(data):
+    """Retain the newest PCM even when an old block must be evicted."""
+    dropped_chunks = dropped_samples = 0
+    while True:
+        try:
+            QUEUE.put_nowait(data)
+            break
+        except queue.Full:
+            try:
+                dropped = QUEUE.get_nowait()
+            except queue.Empty:  # the decoder drained it since put_nowait
+                continue
+            dropped_chunks += 1
+            dropped_samples += len(dropped) // 2
+    with LOCK:
+        STATE["capture_samples"] += len(data) // 2
+        STATE["dropped_chunks"] += dropped_chunks
+        STATE["dropped_samples"] += dropped_samples
+
+
+def capture_blocks(stream):
+    """Join pipe fragments into 100 ms blocks; never split a stereo frame.
+
+    A final short block retains every complete frame at EOF/read failure.
+    Only the final 1..3 bytes of an incomplete frame are discarded.
+    """
+    pending = bytearray()
+    size = CHUNK * 4  # stereo S16_LE
+    while True:
+        try:
+            data = stream.read(size - len(pending))
+        except Exception:
+            data = b""
+        if not data:
+            complete = len(pending) - len(pending) % 4
+            with LOCK:
+                STATE["discarded_capture_bytes"] += len(pending) - complete
+            if complete:
+                yield bytes(pending[:complete])
+            return
+        pending.extend(data)
+        while len(pending) >= size:
+            yield bytes(pending[:size])
+            del pending[:size]
 
 
 class Phrases:
@@ -116,13 +197,7 @@ def capture():
             continue
         window = np.zeros(0, dtype=np.float32)
         last_speech = 0.0
-        while True:
-            try:
-                chunk = proc.stdout.read(CHUNK * 4)
-            except Exception:
-                break
-            if not chunk:
-                break
+        for chunk in capture_blocks(proc.stdout):
             frames = np.frombuffer(chunk, dtype="<i2").reshape(-1, 2)
             mono = frames.mean(axis=1).astype(np.float32) / 32768.0
             rms = float(np.sqrt(np.mean(mono ** 2)))
@@ -138,15 +213,9 @@ def capture():
                 if len(window) >= 4096:
                     STATE["bands"] = bands_from(window)
                 STATE["updated"] = time.time()
-            try:
-                # AcceptWaveform(bytes) expects mono PCM16, not the normalised
-                # float32 samples used above for the meter and spectrum.
-                QUEUE.put_nowait((mono * 32768.0).astype("<i2").tobytes())
-            except queue.Full:
-                try:
-                    QUEUE.get_nowait()
-                except queue.Empty:
-                    pass
+            # AcceptWaveform(bytes) expects mono PCM16, not the normalised
+            # float32 samples used above for the meter and spectrum.
+            queue_audio((mono * 32768.0).astype("<i2").tobytes())
         try:
             proc.kill()
         except Exception:
@@ -162,6 +231,9 @@ def transcribe():
     while True:
         data = QUEUE.get()
         done = rec.AcceptWaveform(data)
+        with LOCK:
+            STATE["decoded_samples"] += len(data) // 2
+            STATE["last_decode_at"] = time.time()
         if done:
             text = json.loads(rec.Result()).get("text", "")
             phrases.add(text, time.time(), time.monotonic())
@@ -192,6 +264,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         with LOCK:
             payload = dict(STATE)
+        payload["queued_audio_ms"] = QUEUE.milliseconds()
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
